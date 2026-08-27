@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
+	"path"
 	"sort"
 	"time"
 
@@ -107,8 +107,14 @@ func (rt *Transfer) receiveFileEntry(flags uint16, last *File) (*File, error) {
 		return nil, err
 	}
 	// TODO: does rsync’s clean_fname() and sanitize_path() combination do
-	// anything more than Go’s filepath.Clean()?
-	f.Name = filepath.Clean(string(b))
+	// anything more than Go’s path.Clean()?
+	// Use path.Clean (not filepath.Clean) to keep forward slashes on Windows,
+	// so that the sort order matches the client’s sort order. filepath.Clean
+	// converts ‘/’ to ‘\\’ on Windows, which changes the byte-wise sort order
+	// (e.g. ‘\\’ > ‘0’ but ‘/’ < ‘0’), causing index mismatches when the
+	// server sends file indices back to the client.
+	f.Name = path.Clean(string(b))
+	rt.Logger.Printf("[flist] receiveFileEntry: l1=%d l2=%d last.Name=%q → name=%q", l1, l2, last.Name, f.Name)
 
 	length, err := rt.Conn.ReadInt64()
 	if err != nil {
@@ -223,6 +229,8 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 		if err != nil {
 			return nil, err
 		}
+		rt.Logger.Printf("[flist] entry %d: flags=0x%x name=%q mode=%o len=%d (last=%q)",
+			len(fileList), flags, f.Name, f.Mode, f.Length, lastFileEntry.Name)
 		lastFileEntry = f
 		// TODO: include depth in output?
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_FLIST, 1) {
