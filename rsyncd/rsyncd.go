@@ -313,9 +313,14 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	if !strings.HasPrefix(clientGreeting, "@RSYNCD: ") {
 		return fmt.Errorf("invalid client greeting: got %q", clientGreeting)
 	}
-	// Parse client protocol version from greeting (e.g. "@RSYNCD: 27" → 27)
+	// Parse client protocol version from greeting (e.g. "@RSYNCD: 31.0" → 31)
+	// Some clients send a decimal version like "31.0", so we take only the integer part.
 	clientProtocolVersion := 0
 	if verStr := strings.TrimSpace(strings.TrimPrefix(clientGreeting, "@RSYNCD: ")); verStr != "" {
+		// Strip decimal part if present (e.g. "31.0" → "31")
+		if dot := strings.Index(verStr, "."); dot >= 0 {
+			verStr = verStr[:dot]
+		}
 		if v, err := strconv.Atoi(verStr); err == nil {
 			clientProtocolVersion = v
 		}
