@@ -7,6 +7,7 @@ package rsyncd
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -212,10 +214,29 @@ func generateChallenge() (string, error) {
 }
 
 // computeAuthHash computes the rsync AUTHREQD response hash.
-// The algorithm is: base64(MD4(password + challenge))
-// This matches the C rsync implementation in authenticate.c:generate_hash().
-func computeAuthHash(password, challenge string) string {
-	h := md4.New()
+// The algorithm depends on the rsync protocol version:
+//
+// For protocol_version < 30 (rsync < 3.0):
+//
+//	base64(MD4(seed_bytes_4_LE + password + challenge))
+//
+// where seed is 0 at auth time (before session checksum negotiation).
+//
+// For protocol_version >= 30 (rsync >= 3.0):
+//
+//	base64(MD5(password + challenge))
+func computeAuthHash(protocolVersion int, password, challenge string) string {
+	if protocolVersion < 30 {
+		// Old format: MD4 with 4-byte little-endian seed (0) prepended,
+		// matching rsync's sum_init() → mdfour_begin + SIVAL(seed) + sum_update.
+		h := md4.New()
+		h.Write([]byte{0, 0, 0, 0}) // checksum_seed=0 as 4-byte LE
+		h.Write([]byte(password))
+		h.Write([]byte(challenge))
+		return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	}
+	// New format: MD5 without seed
+	h := md5.New()
 	h.Write([]byte(password))
 	h.Write([]byte(challenge))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
@@ -223,7 +244,9 @@ func computeAuthHash(password, challenge string) string {
 
 // authenticate performs the rsync AUTHREQD challenge-response authentication
 // for a module that has an AuthFunc configured.
-func (s *Server) authenticate(cwr *rsyncwire.CountingWriter, rd *bufio.Reader, module *Module) error {
+// clientProtocolVersion is the version from the client's greeting (@RSYNCD: N),
+// which determines the hash algorithm used by the client.
+func (s *Server) authenticate(cwr *rsyncwire.CountingWriter, rd *bufio.Reader, module *Module, clientProtocolVersion int) error {
 	// Generate and send challenge
 	challenge, err := generateChallenge()
 	if err != nil {
@@ -247,15 +270,19 @@ func (s *Server) authenticate(cwr *rsyncwire.CountingWriter, rd *bufio.Reader, m
 	}
 	username, clientHash := parts[0], parts[1]
 
+	s.logger.Printf("auth debug: module=%q, clientUsername=%q, clientHash=%q, challenge=%q", module.Name, username, clientHash, challenge)
+
 	// Look up expected password via the module's AuthFunc
 	expectedPassword, ok := module.AuthFunc(module.Name, username)
 	if !ok {
+		s.logger.Printf("auth failed: AuthFunc returned false for user %q on module %q", username, module.Name)
 		fmt.Fprintf(cwr, "@ERROR: auth failed on module %q\n", module.Name)
 		return fmt.Errorf("auth failed: unknown user %q for module %q", username, module.Name)
 	}
 
 	// Compute expected hash and compare (constant-time)
-	expectedHash := computeAuthHash(expectedPassword, challenge)
+	expectedHash := computeAuthHash(clientProtocolVersion, expectedPassword, challenge)
+	s.logger.Printf("auth debug: protocolVersion=%d, expectedHash=%q, clientHash=%q, match=%v", clientProtocolVersion, expectedHash, clientHash, expectedHash == clientHash)
 	if subtle.ConstantTimeCompare([]byte(clientHash), []byte(expectedHash)) != 1 {
 		fmt.Fprintf(cwr, "@ERROR: auth failed on module %q\n", module.Name)
 		return fmt.Errorf("auth failed: bad password for user %q on module %q", username, module.Name)
@@ -284,7 +311,22 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	if !strings.HasPrefix(clientGreeting, "@RSYNCD: ") {
 		return fmt.Errorf("invalid client greeting: got %q", clientGreeting)
 	}
-	// TODO: protocol negotiation
+	// Parse client protocol version from greeting (e.g. "@RSYNCD: 27" → 27)
+	clientProtocolVersion := 0
+	if verStr := strings.TrimSpace(strings.TrimPrefix(clientGreeting, "@RSYNCD: ")); verStr != "" {
+		if v, err := strconv.Atoi(verStr); err == nil {
+			clientProtocolVersion = v
+		}
+	}
+	// The effective protocol version is min(server, client),
+	// matching how rsync negotiates the protocol version.
+	// This is what determines the auth hash algorithm.
+	effectiveProtocolVersion := clientProtocolVersion
+	if effectiveProtocolVersion > rsync.ProtocolVersion {
+		effectiveProtocolVersion = rsync.ProtocolVersion
+	}
+	s.logger.Printf("protocol negotiation: server=%d, client=%d, effective=%d", rsync.ProtocolVersion, clientProtocolVersion, effectiveProtocolVersion)
+	// TODO: full protocol negotiation
 
 	// read requested module(s), if any
 	requestedModule, err := rd.ReadString('\n')
@@ -312,7 +354,7 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 
 	// If the module requires authentication, perform AUTHREQD challenge-response.
 	if module.AuthFunc != nil {
-		if err := s.authenticate(cwr, rd, &module); err != nil {
+		if err := s.authenticate(cwr, rd, &module, effectiveProtocolVersion); err != nil {
 			return err
 		}
 	}
