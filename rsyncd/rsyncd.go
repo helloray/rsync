@@ -7,6 +7,9 @@ package rsyncd
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +28,16 @@ import (
 	"github.com/gokrazy/rsync/internal/rsyncos"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
 	"github.com/gokrazy/rsync/internal/sender"
+	"github.com/mmcloughlin/md4"
 )
+
+// AuthFunc is called to authenticate a client connecting to a module.
+// It receives the module name and the username the client provided.
+// It should return the expected password and true if the user is authorized,
+// or ("", false) if the user is not allowed.
+// When a module has a non-nil AuthFunc, clients must authenticate using
+// the rsync AUTHREQD challenge-response mechanism.
+type AuthFunc func(moduleName, username string) (password string, ok bool)
 
 type Module struct {
 	Name     string   `toml:"name"`
@@ -33,6 +45,12 @@ type Module struct {
 	FS       fs.FS    `toml:"-"`    // If set, serve from this instead of Path
 	ACL      []string `toml:"acl"`
 	Writable bool     `toml:"writable"` // Must be false if FS is set
+
+	// AuthFunc, if non-nil, requires clients to authenticate with username+password.
+	// The function is called with the module name and client-provided username,
+	// and should return the expected password. If AuthFunc is nil, no authentication
+	// is required (only ACL checks apply).
+	AuthFunc AuthFunc `toml:"-"`
 }
 
 // Option specifies the server options.
@@ -184,6 +202,69 @@ func checkACL(acls []string, remoteAddr string) error {
 	return nil
 }
 
+// generateChallenge creates a random base64-encoded challenge string for AUTHREQD.
+func generateChallenge() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating auth challenge: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+// computeAuthHash computes the rsync AUTHREQD response hash.
+// The algorithm is: base64(MD4(password + challenge))
+// This matches the C rsync implementation in authenticate.c:generate_hash().
+func computeAuthHash(password, challenge string) string {
+	h := md4.New()
+	h.Write([]byte(password))
+	h.Write([]byte(challenge))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// authenticate performs the rsync AUTHREQD challenge-response authentication
+// for a module that has an AuthFunc configured.
+func (s *Server) authenticate(cwr *rsyncwire.CountingWriter, rd *bufio.Reader, module *Module) error {
+	// Generate and send challenge
+	challenge, err := generateChallenge()
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(cwr, "@RSYNCD: AUTHREQD %s\n", challenge); err != nil {
+		return err
+	}
+
+	// Read client response: "<username> <hash>\n"
+	response, err := rd.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("reading auth response: %w", err)
+	}
+	response = strings.TrimSpace(response)
+
+	parts := strings.SplitN(response, " ", 2)
+	if len(parts) != 2 {
+		fmt.Fprintf(cwr, "@ERROR: malformed auth response\n")
+		return fmt.Errorf("malformed auth response: %q", response)
+	}
+	username, clientHash := parts[0], parts[1]
+
+	// Look up expected password via the module's AuthFunc
+	expectedPassword, ok := module.AuthFunc(module.Name, username)
+	if !ok {
+		fmt.Fprintf(cwr, "@ERROR: auth failed on module %q\n", module.Name)
+		return fmt.Errorf("auth failed: unknown user %q for module %q", username, module.Name)
+	}
+
+	// Compute expected hash and compare (constant-time)
+	expectedHash := computeAuthHash(expectedPassword, challenge)
+	if subtle.ConstantTimeCompare([]byte(clientHash), []byte(expectedHash)) != 1 {
+		fmt.Fprintf(cwr, "@ERROR: auth failed on module %q\n", module.Name)
+		return fmt.Errorf("auth failed: bad password for user %q on module %q", username, module.Name)
+	}
+
+	s.logger.Printf("auth success: user %q on module %q", username, module.Name)
+	return nil
+}
+
 // FIXME: context cancellation not yet implemented
 func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	_ = ctx // not implemented. what would be the best thing to do? wrap conn's reader part with cancelable reader?
@@ -227,6 +308,13 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	if err := checkACL(module.ACL, conn.name); err != nil {
 		fmt.Fprintf(cwr, "@ERROR: %v\n", err)
 		return err
+	}
+
+	// If the module requires authentication, perform AUTHREQD challenge-response.
+	if module.AuthFunc != nil {
+		if err := s.authenticate(cwr, rd, &module); err != nil {
+			return err
+		}
 	}
 
 	io.WriteString(cwr, terminationCommand)
