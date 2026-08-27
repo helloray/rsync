@@ -205,12 +205,13 @@ func checkACL(acls []string, remoteAddr string) error {
 }
 
 // generateChallenge creates a random base64-encoded challenge string for AUTHREQD.
+// Uses RawStdEncoding (no padding) to match rsync's base64_encode(..., 0).
 func generateChallenge() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating auth challenge: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(b), nil
+	return base64.RawStdEncoding.EncodeToString(b), nil
 }
 
 // computeAuthHash computes the rsync AUTHREQD response hash.
@@ -233,13 +234,13 @@ func computeAuthHash(protocolVersion int, password, challenge string) string {
 		h.Write([]byte{0, 0, 0, 0}) // checksum_seed=0 as 4-byte LE
 		h.Write([]byte(password))
 		h.Write([]byte(challenge))
-		return base64.StdEncoding.EncodeToString(h.Sum(nil))
+		return base64.RawStdEncoding.EncodeToString(h.Sum(nil))
 	}
 	// New format: MD5 without seed
 	h := md5.New()
 	h.Write([]byte(password))
 	h.Write([]byte(challenge))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	return base64.RawStdEncoding.EncodeToString(h.Sum(nil))
 }
 
 // authenticate performs the rsync AUTHREQD challenge-response authentication
@@ -308,6 +309,7 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	if err != nil {
 		return err
 	}
+	s.logger.Printf("raw client greeting: %q", clientGreeting)
 	if !strings.HasPrefix(clientGreeting, "@RSYNCD: ") {
 		return fmt.Errorf("invalid client greeting: got %q", clientGreeting)
 	}
