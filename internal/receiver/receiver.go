@@ -92,7 +92,7 @@ func (rt *Transfer) RecvFiles(fileList []*File) error {
 				}
 			}
 		}
-		if int(idx) >= len(fileList) {
+		if idx < 0 || int(idx) >= len(fileList) {
 			return fmt.Errorf("invalid file index %d (list has %d entries)", idx, len(fileList))
 		}
 		if iflags&rsync.ITEM_TRANSFER == 0 {
