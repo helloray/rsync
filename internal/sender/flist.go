@@ -464,7 +464,7 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 				xflags |= rsync.XMIT_SAME_RDEV_MAJOR
 			}
 			if minorIsSmall {
-				xflags |= rsync.XMIT_RDEV_MINOR_IS_SMALL
+				xflags |= rsync.XMIT_RDEV_MINOR_8_pre30
 			}
 		}
 		if st.Opts.ProtocolVersion() >= 28 {

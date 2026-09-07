@@ -241,7 +241,7 @@ func (rt *Transfer) receiveFileEntry(flags uint16, last *File) (*File, error) {
 					return nil, err
 				}
 				f.RdevMinor = minor
-			case flags&rsync.XMIT_RDEV_MINOR_IS_SMALL != 0:
+			case flags&rsync.XMIT_RDEV_MINOR_8_pre30 != 0:
 				minor, err := rt.Conn.ReadByte()
 				if err != nil {
 					return nil, err

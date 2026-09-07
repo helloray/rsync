@@ -2,19 +2,29 @@ package rsync
 
 // rsync.h
 const (
-	XMIT_TOP_DIR             = (1 << 0)
-	XMIT_SAME_MODE           = (1 << 1)
-	XMIT_EXTENDED_FLAGS      = (1 << 2)
-	XMIT_SAME_RDEV_pre28     = XMIT_EXTENDED_FLAGS /* Only in protocols < 28 */
-	XMIT_SAME_UID            = (1 << 3)
-	XMIT_SAME_GID            = (1 << 4)
-	XMIT_SAME_NAME           = (1 << 5)
-	XMIT_LONG_NAME           = (1 << 6)
-	XMIT_SAME_TIME           = (1 << 7)
-	XMIT_SAME_RDEV_MAJOR     = (1 << 8)
-	XMIT_HAS_IDEV_DATA       = (1 << 9)
-	XMIT_SAME_DEV            = (1 << 10)
-	XMIT_RDEV_MINOR_IS_SMALL = (1 << 11)
+	XMIT_TOP_DIR            = (1 << 0)
+	XMIT_SAME_MODE          = (1 << 1)
+	XMIT_SAME_RDEV_pre28    = (1 << 2) /* protocols 20 - 27  */
+	XMIT_EXTENDED_FLAGS     = (1 << 2) /* protocols 28 - now */
+	XMIT_SAME_UID           = (1 << 3)
+	XMIT_SAME_GID           = (1 << 4)
+	XMIT_SAME_NAME          = (1 << 5)
+	XMIT_LONG_NAME          = (1 << 6)
+	XMIT_SAME_TIME          = (1 << 7)
+	XMIT_SAME_RDEV_MAJOR    = (1 << 8) /* protocols 28 - now (devices only) */
+	XMIT_NO_CONTENT_DIR     = (1 << 8) /* protocols 30 - now (dirs only) */
+	XMIT_HLINKED            = (1 << 9) /* protocols 28 - now (non-dirs)  */
+	XMIT_SAME_DEV_pre30     = (1 << 10) /* protocols 28 - 29 */
+	XMIT_USER_NAME_FOLLOWS  = (1 << 10) /* protocols 30 - now */
+	XMIT_GROUP_NAME_FOLLOWS = (1 << 11) /* protocols 30 - now */
+	XMIT_RDEV_MINOR_8_pre30 = (1 << 11) /* protocols 28 - 29 */
+	XMIT_HLINK_FIRST        = (1 << 12) /* protocols 30 - now (HLINKED only) */
+	XMIT_IO_ERROR_ENDLIST   = (1 << 12) /* protocols 31+ (w/XMIT_EXTENDED_FLAGS) */
+	XMIT_MOD_NSEC           = (1 << 13) /* protocols 31 - now */
+	XMIT_SAME_ATIME         = (1 << 14) /* any protocol - restricted by option */
+	XMIT_UNUSED_15          = (1 << 15) /* unused flag bit */
+	XMIT_RESERVED_16        = (1 << 16) /* reserved for future fileflags */
+	XMIT_CRTIME_EQ_MTIME    = (1 << 17) /* any protocol - restricted by option */
 )
 
 // rsync/rsync.h: itemize flags, exchanged as a shortint (2 bytes

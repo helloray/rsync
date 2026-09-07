@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"encoding/binary"
+	"fmt"
 	"io"
 )
 
@@ -81,4 +83,127 @@ func ReadVarint(r io.Reader) (int32, error) {
 		v |= uint64(buf[i]) << uint(8*i)
 	}
 	return int32(uint32(v)), nil
+}
+
+// WriteVLong writes a variable-length 64-bit integer, mirroring
+// _c-rsync/io.c:write_varlong (and oc-rsync encode.rs:write_varlong). The value
+// is packed into the minimum number of bytes (at least min_bytes), with a
+// leading tag byte that indicates how many bytes follow. Typical min_bytes
+// values: 3 for file lengths (write_varlong30 F_LENGTH), 4 for modtimes.
+func WriteVLong(w io.Writer, value int64, minBytes uint8) error {
+	le := [8]byte(leBytes(value))
+	cnt := 8
+	for cnt > int(minBytes) && le[cnt-1] == 0 {
+		cnt--
+	}
+	bit := byte(1) << uint((7+int(minBytes))-cnt)
+	var leading byte
+	switch {
+	case le[cnt-1] >= bit:
+		cnt++
+		leading = ^(bit - 1)
+	case cnt > int(minBytes):
+		leading = le[cnt-1] | ^(bit*2 - 1)
+	default:
+		leading = le[cnt-1]
+	}
+	buf := make([]byte, 1+cnt-1)
+	buf[0] = leading
+	copy(buf[1:], le[:cnt-1])
+	_, err := w.Write(buf)
+	return err
+}
+
+// ReadVLong reads a variable-length 64-bit integer encoded by WriteVLong,
+// mirroring _c-rsync/io.c:read_varlong (oc-rsync decode.rs:read_varlong).
+func ReadVLong(r io.Reader, minBytes uint8) (int64, error) {
+	if minBytes == 0 || minBytes > 8 {
+		return 0, fmt.Errorf("invalid min_bytes in ReadVLong: %d", minBytes)
+	}
+	min := int(minBytes)
+	initial := make([]byte, min)
+	if _, err := io.ReadFull(r, initial); err != nil {
+		return 0, err
+	}
+	leading := initial[0]
+
+	// Place initial data bytes (after the leading tag) at result[0..min-1]; the
+	// result spans 8 data bytes, matching upstream's 9-byte union.
+	var result [9]byte
+	copy(result[:min-1], initial[1:])
+
+	extra := int(intByteExtra[leading>>2])
+	if extra > 0 {
+		if min+extra > 9 {
+			return 0, fmt.Errorf("overflow in ReadVLong")
+		}
+		bit := byte(1) << uint(8-extra)
+		if _, err := io.ReadFull(r, result[min-1:min-1+extra]); err != nil {
+			return 0, err
+		}
+		result[min+extra-1] = leading & (bit - 1)
+	} else {
+		result[min-1] = leading
+	}
+	return int64(binary.LittleEndian.Uint64(result[:8])), nil
+}
+
+// WriteLongInt writes a 64-bit integer in the pre-30 "longint" encoding
+// (io.c:write_longint): a 4-byte LE int when it fits 0..0x7FFFFFFF, otherwise
+// 0xFFFFFFFF followed by the full 8 bytes.
+func WriteLongInt(w io.Writer, value int64) error {
+	if value >= 0 && value <= 0x7FFFFFFF {
+		return binary.Write(w, binary.LittleEndian, int32(value))
+	}
+	if err := binary.Write(w, binary.LittleEndian, int32(-1)); err != nil {
+		return err
+	}
+	return binary.Write(w, binary.LittleEndian, value)
+}
+
+// ReadLongInt reads a pre-30 "longint" (see WriteLongInt).
+func ReadLongInt(r io.Reader) (int64, error) {
+	var first int32
+	if err := binary.Read(r, binary.LittleEndian, &first); err != nil {
+		return 0, err
+	}
+	if first == -1 {
+		var v int64
+		if err := binary.Read(r, binary.LittleEndian, &v); err != nil {
+			return 0, err
+		}
+		return v, nil
+	}
+	return int64(first), nil
+}
+
+// WriteVLong30 / ReadVLong30 are the protocol >= 30 varlong forms: they are
+// identical to WriteVLong/ReadVLong, exposed for callers keyed by protocol.
+func WriteVLong30(w io.Writer, value int64, minBytes uint8) error {
+	return WriteVLong(w, value, minBytes)
+}
+
+func ReadVLong30(r io.Reader, minBytes uint8) (int64, error) {
+	return ReadVLong(r, minBytes)
+}
+
+// intByteExtra mirrors upstream's INT_BYTE_EXTRA table, indexed by firstByte>>2
+// (6 bits) and giving the number of extra wire bytes that follow the tag byte.
+// Values 0..=6: 0x00-0x03 -> 0, ... 0xFC-0xFF -> 6 (the 5-byte full form needs
+// 4 extra bytes and the table saturates).
+// intByteExtra mirrors upstream's int_byte_extra table (io.c; via
+// oc-rsync varint/table.rs), indexed by leadingByte>>2 (6 bits) and giving the
+// number of extra wire bytes that follow the tag byte.
+var intByteExtra = [64]uint8{
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // (0x00-0x3F) >> 2
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // (0x40-0x7F) >> 2
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // (0x80-0xBF) >> 2
+	2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 6, // (0xC0-0xFF) >> 2
+}
+
+func leBytes(v int64) [8]byte {
+	return [8]byte{
+		byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24),
+		byte(v >> 32), byte(v >> 40), byte(v >> 48), byte(v >> 56),
+	}
 }
