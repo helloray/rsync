@@ -71,11 +71,6 @@ type Transfer struct {
 	Users           map[int32]mapping
 	Groups          map[int32]mapping
 	retouchDirPerms bool
-
-	// rdevMajor mirrors the static rdev_major in
-	// rsync/flist.c:recv_file_entry: it persists across entries and is
-	// only updated when a device entry carries a new major number.
-	rdevMajor int32
 }
 
 func (rt *Transfer) listOnly() bool { return rt.Dest == "" }

@@ -2,13 +2,13 @@ package receiver
 
 import (
 	"fmt"
-	"io"
 	"io/fs"
 	"path"
 	"sort"
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/flist"
 	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -93,239 +93,25 @@ func (f *File) FileMode() fs.FileMode {
 	return ret
 }
 
-// rsync/flist.c:receive_file_entry
-func (rt *Transfer) receiveFileEntry(flags uint16, last *File) (*File, error) {
-	f := &File{}
-
-	var l1 int
-	if flags&rsync.XMIT_SAME_NAME != 0 {
-		l, err := rt.Conn.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		l1 = int(l)
-	}
-
-	var l2 int
-	if flags&rsync.XMIT_LONG_NAME != 0 {
-		l, err := rt.Conn.ReadInt32()
-		if err != nil {
-			return nil, err
-		}
-		l2 = int(l)
-	} else {
-		l, err := rt.Conn.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		l2 = int(l)
-	}
-	// linux/limits.h
-	const PATH_MAX = 4096
-	if l2 >= PATH_MAX-l1 {
-		const lastname = ""
-		return nil, fmt.Errorf("overflow: flags=0x%x l1=%d l2=%d lastname=%s",
-			flags, l1, l2, lastname)
-	}
-	b := make([]byte, l1+l2)
-	readb := b
-	if l1 > 0 {
-		copy(b, []byte(last.Name))
-		readb = b[l1:]
-	}
-	if _, err := io.ReadFull(rt.Conn.Reader, readb); err != nil {
-		return nil, err
-	}
-	// TODO: does rsync’s clean_fname() and sanitize_path() combination do
-	// anything more than Go’s path.Clean()?
-	// Use path.Clean (not filepath.Clean) to keep forward slashes on Windows,
-	// so that the sort order matches the client’s sort order. filepath.Clean
-	// converts ‘/’ to ‘\\’ on Windows, which changes the byte-wise sort order
-	// (e.g. ‘\\’ > ‘0’ but ‘/’ < ‘0’), causing index mismatches when the
-	// server sends file indices back to the client.
-	f.Name = path.Clean(string(b))
-	rt.Logger.Printf("[flist] receiveFileEntry: l1=%d l2=%d last.Name=%q → name=%q", l1, l2, last.Name, f.Name)
-
-	length, err := rt.Conn.ReadInt64()
-	if err != nil {
-		return nil, err
-	}
-	f.Length = length
-
-	if flags&rsync.XMIT_SAME_TIME != 0 {
-		f.ModTime = last.ModTime
-	} else {
-		modTime, err := rt.Conn.ReadInt32()
-		if err != nil {
-			return nil, err
-		}
-		f.ModTime = time.Unix(int64(modTime), 0)
-	}
-
-	if flags&rsync.XMIT_SAME_MODE != 0 {
-		f.Mode = last.Mode
-	} else {
-		mode, err := rt.Conn.ReadInt32()
-		if err != nil {
-			return nil, err
-		}
-		f.Mode = mode
-	}
-
-	if rt.Opts.PreserveUid {
-		if flags&rsync.XMIT_SAME_UID != 0 {
-			f.Uid = last.Uid
-		} else {
-			uid, err := rt.Conn.ReadInt32()
-			if err != nil {
-				return nil, err
-			}
-			f.Uid = uid
-		}
-	}
-
-	if rt.Opts.PreserveGid {
-		if flags&rsync.XMIT_SAME_GID != 0 {
-			f.Gid = last.Gid
-		} else {
-			gid, err := rt.Conn.ReadInt32()
-			if err != nil {
-				return nil, err
-			}
-			f.Gid = gid
-		}
-	}
-
-	mode := f.Mode & rsync.S_IFMT
-	isDev := mode == rsync.S_IFCHR || mode == rsync.S_IFBLK
-	isSpecial := mode == rsync.S_IFIFO || mode == rsync.S_IFSOCK
-	isLink := mode == rsync.S_IFLNK
-
-	if (rt.Opts.PreserveDevices && isDev) ||
-		(rt.Opts.PreserveSpecials && isSpecial && rt.ProtocolVersion() < 31) {
-		if rt.ProtocolVersion() < 28 {
-			if flags&rsync.XMIT_SAME_RDEV_pre28 != 0 {
-				f.Rdev = last.Rdev
-			} else {
-				rdev, err := rt.Conn.ReadInt32()
-				if err != nil {
-					return nil, err
-				}
-				f.Rdev = rdev
-			}
-		} else {
-			// rsync/flist.c:recv_file_entry, protocol >= 28: the device
-			// number is sent as separate major/minor parts.
-			if flags&rsync.XMIT_SAME_RDEV_MAJOR == 0 {
-				if rt.ProtocolVersion() < 30 {
-					major, err := rt.Conn.ReadInt32()
-					if err != nil {
-						return nil, err
-					}
-					rt.rdevMajor = major
-				} else {
-					// TODO(protocol >= 30): varint
-					major, err := rt.Conn.ReadInt32()
-					if err != nil {
-						return nil, err
-					}
-					rt.rdevMajor = major
-				}
-			}
-			f.RdevMajor = rt.rdevMajor
-			switch {
-			case rt.ProtocolVersion() >= 30:
-				// TODO(protocol >= 30): varint
-				minor, err := rt.Conn.ReadInt32()
-				if err != nil {
-					return nil, err
-				}
-				f.RdevMinor = minor
-			case flags&rsync.XMIT_RDEV_MINOR_8_pre30 != 0:
-				minor, err := rt.Conn.ReadByte()
-				if err != nil {
-					return nil, err
-				}
-				f.RdevMinor = int32(minor)
-			default:
-				minor, err := rt.Conn.ReadInt32()
-				if err != nil {
-					return nil, err
-				}
-				f.RdevMinor = minor
-			}
-			f.Rdev = makedev(f.RdevMajor, f.RdevMinor)
-		}
-	}
-
-	if rt.Opts.PreserveLinks && isLink {
-		length, err := rt.Conn.ReadInt32()
-		if err != nil {
-			return nil, err
-		}
-		b := make([]byte, length)
-		if _, err := io.ReadFull(rt.Conn.Reader, b); err != nil {
-			return nil, err
-		}
-		f.LinkTarget = string(b)
-	}
-
-	// rsync/flist.c:recv_file_entry: with protocol >= 28, the whole-file
-	// checksum is only transmitted for regular files (other entry types
-	// carry an empty checksum).
-	if rt.Opts.AlwaysChecksum &&
-		(mode == rsync.S_IFREG || rt.ProtocolVersion() < 28) {
-		if _, err := io.ReadFull(rt.Conn.Reader, f.Checksum[:]); err != nil {
-			return nil, err
-		}
-	}
-
-	return f, nil
-}
-
 // rsync/flist.c:recv_file_list
 func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 	if rt.Opts.Progress {
 		fmt.Fprintln(rt.Env.Stdout, "receiving file list...")
 		fmt.Fprint(rt.Env.Stdout, "0 files to consider")
 	}
-	lastFileEntry := new(File)
-	var fileList []*File
-	for {
-		b, err := rt.Conn.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		if b == 0 {
-			break
-		}
-		flags := uint16(b)
-		// rsync/flist.c:recv_file_list: with protocol >= 28, the extended
-		// flags byte follows when XMIT_EXTENDED_FLAGS is set.
-		if rt.ProtocolVersion() >= 28 && flags&rsync.XMIT_EXTENDED_FLAGS != 0 {
-			ext, err := rt.Conn.ReadByte()
-			if err != nil {
-				return nil, err
-			}
-			flags |= uint16(ext) << 8
-		}
+	r := flist.NewCompleteReader(rt.Conn, rt.flistParams())
+	seg, err := r.Next()
+	if err != nil {
+		return nil, err
+	}
 
-		f, err := rt.receiveFileEntry(flags, lastFileEntry)
-		if err != nil {
-			return nil, err
-		}
-		rt.Logger.Printf("[flist] entry %d: flags=0x%x name=%q mode=%o len=%d (last=%q)",
-			len(fileList), flags, f.Name, f.Mode, f.Length, lastFileEntry.Name)
-		lastFileEntry = f
+	var fileList []*File
+	for _, fe := range seg.Entries {
+		f := rt.toFile(fe)
 		// TODO: include depth in output?
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_FLIST, 1) {
 			rt.Logger.Printf("[Receiver] i=%d ? %s mode=%o len=%d uid=%d gid=%d flags=?",
-				len(fileList),
-				f.Name,
-				f.Mode,
-				f.Length,
-				f.Uid,
-				f.Gid)
+				len(fileList), f.Name, f.Mode, f.Length, f.Uid, f.Gid)
 		}
 		fileList = append(fileList, f)
 		if rt.Opts.Progress && len(fileList)%100 == 0 {
@@ -338,25 +124,52 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 
 	rt.sortFileList(fileList)
 
-	if rt.Opts.PreserveUid || rt.Opts.PreserveGid {
-		// receive the uid/gid list
-		users, groups, err := rt.RecvIdList()
-		if err != nil {
-			return nil, err
-		}
-		rt.Users = users
-		rt.Groups = groups
-	}
-
-	// read the i/o error flag
-	ioErrors, err := rt.Conn.ReadInt32()
-	if err != nil {
-		return nil, err
-	}
-	if rt.Opts.DebugGTE(rsyncopts.DEBUG_FLIST, 2) {
-		rt.Logger.Printf("ioErrors: %v", ioErrors)
-	}
-	rt.IOErrors = ioErrors
-
+	// The trailing uid/gid id lists and the i/o error word are consumed inside
+	// flist.ReadFileList; the error word is surfaced here for the transfer-level
+	// error handling.
+	rt.IOErrors = seg.IOError
 	return fileList, nil
+}
+
+// flistParams derives the flist codec parameters for this receiver from the
+// negotiated session and options. NumericIDs is always true: this receiver
+// does not perform uid/gid-name remapping, so names ride the trailing id list
+// at every protocol.
+func (rt *Transfer) flistParams() flist.Params {
+	p := flist.Params{
+		ProtocolVersion:  rt.ProtocolVersion(),
+		PreserveUid:      rt.Opts.PreserveUid,
+		PreserveGid:      rt.Opts.PreserveGid,
+		PreserveLinks:    rt.Opts.PreserveLinks,
+		PreserveDevices:  rt.Opts.PreserveDevices,
+		PreserveSpecials: rt.Opts.PreserveSpecials,
+		AlwaysChecksum:   rt.Opts.AlwaysChecksum,
+		NumericIDs:       true,
+	}
+	if rt.Session != nil {
+		p.VarintFlags = rt.Session.VarintFlistFlags
+		p.IncRecurse = rt.Session.IncRecurse
+	}
+	return p
+}
+
+// toFile converts a flist.FileEntry (the wire model) into the receiver's File
+// format. It mirrors the field-by-field assignment of the former in-line
+// receive_file_entry, including the forward-slash-safe path.Clean on the name
+// that keeps the server-side sort order identical to the client's.
+func (rt *Transfer) toFile(fe *flist.FileEntry) *File {
+	f := &File{
+		Name:       path.Clean(fe.Name),
+		Length:     fe.Length,
+		ModTime:    time.Unix(int64(fe.ModTime), int64(fe.ModNsec)),
+		Mode:       fe.Mode,
+		Uid:        fe.Uid,
+		Gid:        fe.Gid,
+		LinkTarget: fe.LinkTarget,
+		RdevMajor:  fe.RdevMajor,
+		RdevMinor:  fe.RdevMinor,
+	}
+	f.Rdev = makedev(fe.RdevMajor, fe.RdevMinor)
+	copy(f.Checksum[:], fe.Checksum[:])
+	return f
 }
