@@ -1,6 +1,7 @@
 package sender
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -14,10 +15,10 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/flist"
 	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
-	"github.com/gokrazy/rsync/internal/rsyncwire"
 )
 
 type file struct {
@@ -339,7 +340,7 @@ func rdevMajorMinor(rdev int32) (int32, int32) {
 // rsync/flist.c:send_file_list
 func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRuleList) (*fileList, error) {
 	var fileList fileList
-	fec := &rsyncwire.Buffer{}
+	fec := new(bytes.Buffer)
 
 	uidMap := make(map[int32]string)
 	gidMap := make(map[int32]string)
@@ -431,155 +432,58 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 		})
 	}
 
-	rdevMajor := int32(0)
+	// Encode every entry plus the terminator, trailing uid/gid id lists and the
+	// i/o error word through the shared flist codec, mirroring
+	// _c-rsync/flist.c:send_file_list + uidlist.c:send_id_lists. The encoder
+	// owns the cross-entry compression state (SAME_NAME prefix, SAME_UID/GID,
+	// rdev major) so no per-entry scratch is needed here.
+	entries := make([]*flist.FileEntry, len(fileList.Files))
 	for i := range fileList.Files {
 		f := &fileList.Files[i]
-
-		fec.Reset()
-
-		mode := f.Mode & rsync.S_IFMT
-		isDev := mode == rsync.S_IFCHR || mode == rsync.S_IFBLK
-		isSpecial := mode == rsync.S_IFIFO || mode == rsync.S_IFSOCK
-		sendRdev := (st.Opts.PreserveDevices() && isDev) ||
-			(st.Opts.PreserveSpecials() && isSpecial)
-
-		// 1.   status byte (integer)
-		xflags := uint16(f.Flags)
-		sameRdevMajor := false
-		minorIsSmall := false
-		minor := f.RdevMinor
-		if sendRdev && st.Opts.ProtocolVersion() >= 28 {
-			if isSpecial {
-				// rsync/flist.c:send_file_entry: special files don't
-				// need an rdev number, so just make the historical
-				// transmission of the value efficient.
-				minor = 0
-				sameRdevMajor = true
-				minorIsSmall = true
-			} else {
-				sameRdevMajor = f.RdevMajor == rdevMajor
-				minorIsSmall = f.RdevMinor <= 0xFF
-			}
-			if sameRdevMajor {
-				xflags |= rsync.XMIT_SAME_RDEV_MAJOR
-			}
-			if minorIsSmall {
-				xflags |= rsync.XMIT_RDEV_MINOR_8_pre30
-			}
+		fe := &flist.FileEntry{
+			Name:       f.Wpath,
+			Length:     f.Length,
+			ModTime:    int32(f.ModTime.Unix()),
+			Mode:       f.Mode,
+			Uid:        f.Uid,
+			Gid:        f.Gid,
+			RdevMajor:  f.RdevMajor,
+			RdevMinor:  f.RdevMinor,
+			LinkTarget: f.LinkTarget,
 		}
-		if st.Opts.ProtocolVersion() >= 28 {
-			// rsync/flist.c:send_file_entry: with protocol >= 28, emit
-			// the flags as a shortint when the high byte is needed (or
-			// the low byte would be zero), so that the receiver can
-			// tell the two apart.
-			if xflags == 0 && !f.isDir() {
-				xflags |= rsync.XMIT_TOP_DIR
-			}
-			if xflags&0xFF00 != 0 || xflags == 0 {
-				xflags |= rsync.XMIT_EXTENDED_FLAGS
-				fec.WriteShortint(xflags)
-			} else {
-				fec.WriteByte(byte(xflags))
-			}
-		} else {
-			fec.WriteByte(byte(xflags))
-		}
-
-		// 2.   inherited filename length (optional, byte)
-		// 3.   filename length (integer or byte)
-		// Only ever transmit long names, like openrsync
-		fec.WriteInt32(int32(len(f.Wpath)))
-
-		// 4.   file (byte array)
-		fec.WriteString(f.Wpath)
-
-		// 5.   file length (long)
-		fec.WriteInt64(f.Length)
-
-		// 6.   file modification time (optional, integer)
-		// TODO: this will overflow in 2038! :(
-		fec.WriteInt32(int32(f.ModTime.Unix()))
-
-		// 7.   file mode (optional, mode_t, integer)
-		fec.WriteInt32(f.Mode)
-
-		if st.Opts.PreserveUid() {
-			// 8.   if -o, the user id (integer)
-			fec.WriteInt32(f.Uid)
-		}
-
-		if st.Opts.PreserveGid() {
-			// 9.   if -g, the group id (integer)
-			fec.WriteInt32(f.Gid)
-		}
-
-		if sendRdev {
-			// 10.  if a special file and -D, the device “rdev” type
-			if st.Opts.ProtocolVersion() < 28 {
-				fec.WriteInt32(f.Rdev)
-			} else {
-				// rsync/flist.c:send_file_entry, protocol >= 28: the
-				// device number is sent as separate major/minor parts.
-				if !sameRdevMajor {
-					rdevMajor = f.RdevMajor
-					fec.WriteInt32(rdevMajor)
-				}
-				if minorIsSmall {
-					fec.WriteByte(byte(minor))
-				} else {
-					fec.WriteInt32(minor)
-				}
-			}
-		}
-
-		if st.Opts.PreserveLinks() && mode == rsync.S_IFLNK {
-			// 11.  if a symbolic link and -l, the link target's length (integer)
-			// 12.  if a symbolic link and -l, the link target (byte array)
-			fec.WriteInt32(int32(len(f.LinkTarget)))
-			fec.WriteString(f.LinkTarget)
-		}
-
-		// rsync/flist.c:send_file_entry: with protocol >= 28, the whole-file
-		// checksum is only transmitted for regular files (other entry types
-		// carry an empty checksum).
-		if st.Opts.AlwaysChecksum() &&
-			(mode == rsync.S_IFREG || st.Opts.ProtocolVersion() < 28) {
-			fec.WriteString(string(f.Checksum[:]))
-		}
-
-		if err := st.Conn.WriteString(fec.String()); err != nil {
-			return nil, err
-		}
+		copy(fe.Checksum[:], f.Checksum[:])
+		entries[i] = fe
 	}
 
 	fec.Reset()
-
-	const endOfFileList = 0
-	fec.WriteByte(endOfFileList)
-
-	const endOfSet = 0
-	if st.Opts.PreserveUid() {
-		for uid, name := range uidMap {
-			fec.WriteInt32(uid)
-			fec.WriteByte(byte(len(name)))
-			fec.WriteString(name)
-		}
-		fec.WriteInt32(endOfSet)
+	if err := flist.WriteFileList(fec, st.flistParams(), entries, uidMap, gidMap, ioErrors); err != nil {
+		return nil, err
 	}
-	if st.Opts.PreserveGid() {
-		for gid, name := range gidMap {
-			fec.WriteInt32(gid)
-			fec.WriteByte(byte(len(name)))
-			fec.WriteString(name)
-		}
-		fec.WriteInt32(endOfSet)
-	}
-
-	fec.WriteInt32(ioErrors)
-
 	if err := st.Conn.WriteString(fec.String()); err != nil {
 		return nil, err
 	}
 
 	return &fileList, nil
+}
+
+// flistParams derives the flist codec parameters for this sender from the
+// negotiated session and options. NumericIDs is always true: this sender does
+// not transmit inline uid/gid names, so the names ride the trailing id list at
+// every protocol.
+func (st *Transfer) flistParams() flist.Params {
+	p := flist.Params{
+		ProtocolVersion:  st.Opts.ProtocolVersion(),
+		PreserveUid:      st.Opts.PreserveUid(),
+		PreserveGid:      st.Opts.PreserveGid(),
+		PreserveLinks:    st.Opts.PreserveLinks(),
+		PreserveDevices:  st.Opts.PreserveDevices(),
+		PreserveSpecials: st.Opts.PreserveSpecials(),
+		AlwaysChecksum:   st.Opts.AlwaysChecksum(),
+		NumericIDs:       true,
+	}
+	if st.Session != nil {
+		p.VarintFlags = st.Session.VarintFlistFlags
+		p.IncRecurse = st.Session.IncRecurse
+	}
+	return p
 }
