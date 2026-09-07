@@ -29,7 +29,7 @@ func (rt *Transfer) GenerateFiles(fileList []*File) error {
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 		rt.Logger.Printf("generateFiles phase=%d", phase)
 	}
-	if err := rt.Conn.WriteInt32(-1); err != nil {
+	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
 		return err
 	}
 
@@ -38,7 +38,7 @@ func (rt *Transfer) GenerateFiles(fileList []*File) error {
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 		rt.Logger.Printf("generateFiles phase=%d", phase)
 	}
-	if err := rt.Conn.WriteInt32(-1); err != nil {
+	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
 		return err
 	}
 
@@ -49,7 +49,7 @@ func (rt *Transfer) GenerateFiles(fileList []*File) error {
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 			rt.Logger.Printf("generateFiles phase=%d", phase)
 		}
-		if err := rt.Conn.WriteInt32(-1); err != nil {
+		if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
 			return err
 		}
 	}

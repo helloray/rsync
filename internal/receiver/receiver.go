@@ -26,7 +26,7 @@ func (rt *Transfer) RecvFiles(fileList []*File) error {
 		maxPhase = 2
 	}
 	for {
-		idx, err := rt.Conn.ReadInt32()
+		idx, err := rt.readNdx()
 		if err != nil {
 			return err
 		}

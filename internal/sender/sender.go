@@ -2,6 +2,7 @@ package sender
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,15 +13,34 @@ import (
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsynccommon"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
+	"github.com/gokrazy/rsync/internal/rsyncwire"
 	"github.com/mmcloughlin/md4"
 	"golang.org/x/sync/errgroup"
 )
 
+// ndxWrite returns the NDX writer codec, creating it from the negotiated
+// protocol version on first use.
+func (st *Transfer) ndxWrite() *protocol.NdxCodec {
+	if st.ndxWriteC == nil {
+		st.ndxWriteC = protocol.NewNdxCodec(st.Opts.ProtocolVersion())
+	}
+	return st.ndxWriteC
+}
+
+// ndxRead returns the NDX reader codec, creating it from the negotiated
+// protocol version on first use.
+func (st *Transfer) ndxRead() *protocol.NdxCodec {
+	if st.ndxReadC == nil {
+		st.ndxReadC = protocol.NewNdxCodec(st.Opts.ProtocolVersion())
+	}
+	return st.ndxReadC
+}
+
 // writeNdxTransfer sends a transfer request index to the receiver, like
 // rsync/sender.c:write_ndx_and_attrs with iflags=ITEM_TRANSFER
-// (rsync/io.c:write_ndx falls back to a plain int32 for protocol < 30).
+// (byte-reduction encoding for protocol >= 30, a plain int32 below).
 func (st *Transfer) writeNdxTransfer(fileIndex int32) error {
-	if err := st.Conn.WriteInt32(fileIndex); err != nil {
+	if err := st.ndxWrite().WriteNdx(st.Conn, fileIndex); err != nil {
 		return err
 	}
 	if !protocol.SupportsIFlags(st.Opts.ProtocolVersion()) {
@@ -33,7 +53,7 @@ func (st *Transfer) writeNdxTransfer(fileIndex int32) error {
 // receiver, like rsync/sender.c:write_ndx_and_attrs (rsync/io.c:write_ndx
 // falls back to a plain int32 for protocol < 30).
 func (st *Transfer) writeNdxAndAttrs(fileIndex int32, iflags uint16, fnamecmpType byte) error {
-	if err := st.Conn.WriteInt32(fileIndex); err != nil {
+	if err := st.ndxWrite().WriteNdx(st.Conn, fileIndex); err != nil {
 		return err
 	}
 	if !protocol.SupportsIFlags(st.Opts.ProtocolVersion()) {
@@ -62,8 +82,17 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 		// receive data about receiver’s copy of the file list contents (not
 		// ordered)
 		// see (*rsync.Receiver).Generator()
-		fileIndex, err := st.Conn.ReadInt32()
+		fileIndex, err := st.ndxRead().ReadNdx(st.Conn)
 		if err != nil {
+			// A multiplex control frame (per-file Success/NoSend/Deleted, stats,
+			// ...) can surface here wherever DATA was expected. In the default
+			// full-list path our peer never sends these, but tolerate them so a
+			// stray frame can't abort the transfer: log and keep reading.
+			var cfe *rsyncwire.ControlFrameError
+			if errors.As(err, &cfe) {
+				st.Logger.Printf("ignoring control frame tag %d while reading ndx", cfe.Tag)
+				continue
+			}
 			return err
 		}
 		if fileIndex == -1 {
@@ -80,7 +109,7 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 				break
 			}
 			// acknowledge phase change by sending -1
-			if err := st.Conn.WriteInt32(-1); err != nil {
+			if err := st.ndxWrite().WriteNdx(st.Conn, protocol.NdxDone); err != nil {
 				return err
 			}
 			continue
@@ -198,7 +227,7 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 	}
 
 	// phase done
-	if err := st.Conn.WriteInt32(-1); err != nil {
+	if err := st.ndxWrite().WriteNdx(st.Conn, protocol.NdxDone); err != nil {
 		return err
 	}
 

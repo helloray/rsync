@@ -64,6 +64,14 @@ type Transfer struct {
 	// and per-file message framing.
 	Session *protocol.Session
 
+	// Ndx codecs, one per wire direction. The modern (protocol >= 30) NDX
+	// encoding is delta-encoded and stateful, so a single codec must be reused
+	// for its direction across the whole transfer. The writer codec is used
+	// only from the generator goroutine, the reader codec only from the
+	// receiver goroutine, so the two never contend.
+	ndxWriteC *protocol.NdxCodec
+	ndxReadC  *protocol.NdxCodec
+
 	// state
 	Conn            *rsyncwire.Conn
 	Seed            int32
@@ -75,17 +83,41 @@ type Transfer struct {
 
 func (rt *Transfer) listOnly() bool { return rt.Dest == "" }
 
+// ndxWrite returns the NDX writer codec, creating it from the negotiated
+// protocol version on first use.
+func (rt *Transfer) ndxWrite() *protocol.NdxCodec {
+	if rt.ndxWriteC == nil {
+		rt.ndxWriteC = protocol.NewNdxCodec(rt.ProtocolVersion())
+	}
+	return rt.ndxWriteC
+}
+
+// ndxRead returns the NDX reader codec, creating it from the negotiated
+// protocol version on first use.
+func (rt *Transfer) ndxRead() *protocol.NdxCodec {
+	if rt.ndxReadC == nil {
+		rt.ndxReadC = protocol.NewNdxCodec(rt.ProtocolVersion())
+	}
+	return rt.ndxReadC
+}
+
 // writeNdx sends a file index to the sender, like rsync/io.c:write_ndx
-// (which falls back to a plain int32 for protocol < 30) followed, for
-// protocol >= 29, by the itemize iflags shortint
+// (byte-reduction encoding for protocol >= 30, a plain int32 below) followed,
+// for protocol >= 29, by the itemize iflags shortint
 // (rsync/generator.c:itemize). Negative indices are phase markers
 // (e.g. NDX_DONE) and never carry iflags.
 func (rt *Transfer) writeNdx(idx int32, iflags uint16) error {
-	if err := rt.Conn.WriteInt32(idx); err != nil {
+	if err := rt.ndxWrite().WriteNdx(rt.Conn, idx); err != nil {
 		return err
 	}
 	if idx < 0 || !protocol.SupportsIFlags(rt.ProtocolVersion()) {
 		return nil
 	}
 	return rt.Conn.WriteShortint(iflags)
+}
+
+// readNdx reads a file index from the sender, like rsync/io.c:read_ndx
+// (byte-reduction decoding for protocol >= 30, a plain int32 below).
+func (rt *Transfer) readNdx() (int32, error) {
+	return rt.ndxRead().ReadNdx(rt.Conn)
 }

@@ -110,7 +110,7 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	}
 
 	// send final goodbye message
-	if err := c.WriteInt32(-1); err != nil {
+	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
 		return nil, err
 	}
 

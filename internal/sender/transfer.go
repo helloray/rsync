@@ -47,6 +47,12 @@ type Transfer struct {
 	// and per-file message framing.
 	Session *protocol.Session
 
+	// Ndx codecs, one per wire direction. The modern (protocol >= 30) NDX
+	// encoding is delta-encoded and stateful, so a single codec must be reused
+	// for its direction across the whole transfer.
+	ndxWriteC *protocol.NdxCodec
+	ndxReadC  *protocol.NdxCodec
+
 	// state
 	Conn      *rsyncwire.Conn
 	Seed      int32
