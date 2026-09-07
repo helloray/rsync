@@ -10,31 +10,86 @@ import (
 	"path/filepath"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/mmcloughlin/md4"
 )
 
 // rsync/receiver.c:recv_files
 func (rt *Transfer) RecvFiles(fileList []*File) error {
+	// rsync/receiver.c:recv_files: max_phase is 2 with protocol >= 29, so
+	// the receiver reads three phase-done markers in total (two phase
+	// transitions and the final marker).
 	phase := 0
+	maxPhase := 1
+	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {
+		maxPhase = 2
+	}
 	for {
 		idx, err := rt.Conn.ReadInt32()
 		if err != nil {
 			return err
 		}
 		if idx == -1 {
-			if phase == 0 {
-				phase++
-				if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
-					rt.Logger.Printf("recvFiles phase=%d", phase)
-				}
-				// TODO: send done message
+			phase++
+			if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
+				rt.Logger.Printf("recvFiles phase=%d", phase)
+			}
+			if phase > maxPhase {
+				break
+			}
+			continue
+		}
+		if idx < 0 {
+			return fmt.Errorf("invalid file index %d (list has %d entries)", idx, len(fileList))
+		}
+
+		// rsync/rsync.c:read_ndx_and_attrs: with protocol >= 29, the file
+		// index is followed by the itemize iflags shortint, optionally the
+		// basis type byte and the xname vstring.
+		iflags := uint16(rsync.ITEM_TRANSFER)
+		fnamecmpType := byte(rsync.FNAMECMP_FNAME)
+		if protocol.SupportsIFlags(rt.ProtocolVersion()) {
+			var err error
+			iflags, err = rt.Conn.ReadShortint()
+			if err != nil {
+				return err
+			}
+			// rsync/rsync.c:read_ndx_and_attrs: support the protocol-29
+			// keep-alive style (index == list length, iflags == ITEM_IS_NEW).
+			if rt.ProtocolVersion() < 30 &&
+				int(idx) == len(fileList) &&
+				iflags == rsync.ITEM_IS_NEW {
 				continue
 			}
-			break
+			if iflags&rsync.ITEM_BASIS_TYPE_FOLLOWS != 0 {
+				fnamecmpType, err = rt.Conn.ReadByte()
+				if err != nil {
+					return err
+				}
+			}
+			if iflags&rsync.ITEM_XNAME_FOLLOWS != 0 {
+				if _, err := rt.Conn.ReadVString(); err != nil {
+					return err
+				}
+			}
 		}
+		if int(idx) >= len(fileList) {
+			return fmt.Errorf("invalid file index %d (list has %d entries)", idx, len(fileList))
+		}
+		if iflags&rsync.ITEM_TRANSFER == 0 {
+			// The sender echoes itemize messages for entries that do not
+			// carry data (e.g. attribute-only updates). Nothing to receive
+			// for them.
+			if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
+				rt.Logger.Printf("recvFiles idx=%d iflags=0x%x (no transfer)", idx, iflags)
+			}
+			continue
+		}
+
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
-			rt.Logger.Printf("receiving file idx=%d: %+v", idx, fileList[idx])
+			rt.Logger.Printf("receiving file idx=%d iflags=0x%x fnamecmpType=0x%x: %+v",
+				idx, iflags, fnamecmpType, fileList[idx])
 		}
 		if rt.Opts.Progress {
 			fmt.Fprintln(rt.Env.Stdout, fileList[idx].Name)

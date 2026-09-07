@@ -107,6 +107,12 @@ func (b *Buffer) WriteInt32(data int32) {
 	binary.Write(&b.buf, binary.LittleEndian, data)
 }
 
+// WriteShortint writes a 2-byte little-endian value,
+// like rsync/io.c:write_shortint().
+func (b *Buffer) WriteShortint(data uint16) {
+	binary.Write(&b.buf, binary.LittleEndian, data)
+}
+
 func (b *Buffer) WriteInt64(data int64) {
 	// send as a 32-bit integer if possible
 	if data <= 0x7FFFFFFF && data >= 0 {
@@ -152,6 +158,12 @@ func (c *Conn) WriteInt32(data int32) error {
 	return binary.Write(c.Writer, binary.LittleEndian, data)
 }
 
+// WriteShortint writes a 2-byte little-endian value,
+// like rsync/io.c:write_shortint().
+func (c *Conn) WriteShortint(data uint16) error {
+	return binary.Write(c.Writer, binary.LittleEndian, data)
+}
+
 func (c *Conn) WriteInt64(data int64) error {
 	// send as a 32-bit integer if possible
 	if data <= 0x7FFFFFFF && data >= 0 {
@@ -169,6 +181,51 @@ func (c *Conn) WriteString(data string) error {
 	return err
 }
 
+// WriteVString writes a length-prefixed string using the vstring encoding
+// (rsync/io.c:write_vstring): a single length byte for lengths <= 0x7F,
+// otherwise two bytes (0x80|len>>8, len&0xFF). Note that this encoding is
+// different from (future) varint-prefixed strings.
+func (c *Conn) WriteVString(data string) error {
+	l := len(data)
+	if l > 0x7FFF {
+		return fmt.Errorf("vstring of length %d exceeds 0x7FFF", l)
+	}
+	if l <= 0x7F {
+		if err := c.WriteByte(byte(l)); err != nil {
+			return err
+		}
+	} else {
+		if err := c.WriteByte(byte(0x80 | l>>8)); err != nil {
+			return err
+		}
+		if err := c.WriteByte(byte(l & 0xFF)); err != nil {
+			return err
+		}
+	}
+	return c.WriteString(data)
+}
+
+// ReadVString reads a vstring-encoded string (see WriteVString).
+func (c *Conn) ReadVString() (string, error) {
+	b, err := c.ReadByte()
+	if err != nil {
+		return "", err
+	}
+	l := int(b)
+	if b&0x80 != 0 {
+		b2, err := c.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		l = int(b&0x7F)<<8 | int(b2)
+	}
+	buf := make([]byte, l)
+	if _, err := io.ReadFull(c.Reader, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
 func (c *Conn) ReadByte() (byte, error) {
 	var buf [1]byte
 	if _, err := io.ReadFull(c.Reader, buf[:]); err != nil {
@@ -183,6 +240,16 @@ func (c *Conn) ReadInt32() (int32, error) {
 		return 0, err
 	}
 	return int32(binary.LittleEndian.Uint32(buf[:])), nil
+}
+
+// ReadShortint reads a 2-byte little-endian value,
+// like rsync/io.c:read_shortint().
+func (c *Conn) ReadShortint() (uint16, error) {
+	var buf [2]byte
+	if _, err := io.ReadFull(c.Reader, buf[:]); err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint16(buf[:]), nil
 }
 
 func (c *Conn) ReadInt64() (int64, error) {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncstats"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
@@ -118,14 +119,16 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 
 // rsync/main.c:report
 func (rt *Transfer) report(c *rsyncwire.Conn) (*rsyncstats.TransferStats, error) {
-	// read statistics:
-	// total bytes read (from network connection)
-	read, err := c.ReadInt64()
+	// Read the first two in opposite order (compared to the sender’s
+	// handle_stats) because the meaning of read/write swaps when switching
+	// from sender to receiver (rsync/main.c:handle_stats).
+	// total bytes written (to network connection)
+	written, err := c.ReadInt64()
 	if err != nil {
 		return nil, err
 	}
-	// total bytes written (to network connection)
-	written, err := c.ReadInt64()
+	// total bytes read (from network connection)
+	read, err := c.ReadInt64()
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +136,16 @@ func (rt *Transfer) report(c *rsyncwire.Conn) (*rsyncstats.TransferStats, error)
 	size, err := c.ReadInt64()
 	if err != nil {
 		return nil, err
+	}
+	// rsync/main.c:handle_stats: with protocol >= 29, the file list build
+	// and transfer times follow the three byte counters.
+	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {
+		if _, err := c.ReadInt64(); err != nil { // flist build time
+			return nil, err
+		}
+		if _, err := c.ReadInt64(); err != nil { // flist transfer time
+			return nil, err
+		}
 	}
 	if rt.Opts.InfoGTE(rsyncopts.INFO_STATS, 1) {
 		rt.Logger.Printf("server sent stats: read=%d, written=%d, size=%d", read, written, size)

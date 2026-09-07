@@ -107,6 +107,8 @@ func StartInbandExchange(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.Re
 	if remoteProtocol < 27 {
 		return false, fmt.Errorf("server version %d too old", remoteProtocol)
 	}
+	// The negotiated protocol version is the lower of the two greetings.
+	opts.SetProtocolVersion(int(min(remoteProtocol, int32(rsync.ProtocolVersion))))
 
 	if opts.Verbose() {
 		osenv.Logf("(Client) Protocol versions: remote=%d, negotiated=%d", remoteProtocol, rsync.ProtocolVersion)

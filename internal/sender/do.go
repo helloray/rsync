@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncstats"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
@@ -27,6 +28,16 @@ func (st *Transfer) handleStats(crd *rsyncwire.CountingReader, cwr *rsyncwire.Co
 	// total size of files
 	if err := st.Conn.WriteInt64(fileList.TotalSize); err != nil {
 		return err
+	}
+	// rsync/main.c:handle_stats: with protocol >= 29, the file list build
+	// and transfer times follow the three byte counters.
+	if protocol.SupportsMultiPhase(st.Opts.ProtocolVersion()) {
+		if err := st.Conn.WriteInt64(0); err != nil { // flist build time
+			return err
+		}
+		if err := st.Conn.WriteInt64(0); err != nil { // flist transfer time
+			return err
+		}
 	}
 	return nil
 }
@@ -55,9 +66,15 @@ func (st *Transfer) Do(crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWri
 	// Sort the file list. The client sorts, so we need to sort, too (in the
 	// same way!), otherwise our indices do not match what the client will
 	// request.
-	sort.Slice(fileList.Files, func(i, j int) bool {
-		return fileList.Files[i].Wpath < fileList.Files[j].Wpath
-	})
+	//
+	// For protocol >= 29, SendFileList already ordered the files with
+	// f_name_cmp (both C sides sort identically), so only the legacy
+	// lexical order still needs to be applied here.
+	if st.Opts.ProtocolVersion() < 29 {
+		sort.Slice(fileList.Files, func(i, j int) bool {
+			return fileList.Files[i].Wpath < fileList.Files[j].Wpath
+		})
+	}
 
 	if err := st.SendFiles(fileList); err != nil {
 		return nil, err

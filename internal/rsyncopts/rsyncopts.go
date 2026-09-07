@@ -704,6 +704,13 @@ See https://github.com/gokrazy/rsync for updates, bug reports, and answers
 }
 
 func (o *Options) ShellCommand() string       { return o.shell_cmd }
+
+// ProtocolVersion returns the negotiated protocol version to use for this
+// connection.
+func (o *Options) ProtocolVersion() int { return o.protocol_version }
+
+// SetProtocolVersion overrides the protocol version after negotiation.
+func (o *Options) SetProtocolVersion(v int) { o.protocol_version = v }
 func (o *Options) UpdateOnly() bool           { return o.update_only != 0 }
 func (o *Options) DryRun() bool               { return o.dry_run != 0 }
 func (o *Options) PreserveLinks() bool        { return o.preserve_links != 0 }

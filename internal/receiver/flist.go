@@ -9,15 +9,43 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 )
 
 // rsync/flist.c:flist_sort_and_clean
-func sortFileList(fileList []*File) {
+//
+// For protocol 29 and newer, the sender sorts file lists with
+// f_name_cmp (t_PATH semantics), which places directory contents after
+// plain entries at each level. The receiver must mirror that comparator
+// to keep the file indices it sends back to the sender aligned with the
+// sender’s file list.
+func (rt *Transfer) sortFileList(fileList []*File) {
+	if protocol.UsesOldPrefixes(rt.ProtocolVersion()) {
+		sort.Slice(fileList, func(i, j int) bool {
+			return fileList[i].Name < fileList[j].Name
+		})
+		return
+	}
 	sort.Slice(fileList, func(i, j int) bool {
-		return fileList[i].Name < fileList[j].Name
+		a, b := fileList[i], fileList[j]
+		return protocol.FNameCmp(a.Name, a.isDir(), b.Name, b.isDir()) < 0
 	})
+}
+
+func (f *File) isDir() bool {
+	return f.Mode&rsync.S_IFMT == rsync.S_IFDIR
+}
+
+// makedev composes a device number from major/minor parts, matching the
+// glibc makedev() macro that tridge rsync uses for local device nodes.
+// Device numbers with a major >= 4096 exceed int32 and are not supported.
+func makedev(major, minor int32) int32 {
+	dev := (uint32(major)&0xfff)<<8 |
+		uint32(minor)&0xff |
+		(uint32(minor)&^uint32(0xff))<<12
+	return int32(dev)
 }
 
 // rsync/receiver.c:delete_files
@@ -37,6 +65,8 @@ type File struct {
 	Gid        int32
 	LinkTarget string
 	Rdev       int32
+	RdevMajor  int32
+	RdevMinor  int32
 	Checksum   [rsyncchecksum.Size]byte
 }
 
@@ -171,16 +201,60 @@ func (rt *Transfer) receiveFileEntry(flags uint16, last *File) (*File, error) {
 	isSpecial := mode == rsync.S_IFIFO || mode == rsync.S_IFSOCK
 	isLink := mode == rsync.S_IFLNK
 
-	if rt.Opts.PreserveDevices && (isDev || isSpecial) {
-		// TODO(protocol >= 28): rdev/major/minor handling
-		if flags&rsync.XMIT_SAME_RDEV_pre28 != 0 {
-			f.Rdev = last.Rdev
-		} else {
-			rdev, err := rt.Conn.ReadInt32()
-			if err != nil {
-				return nil, err
+	if (rt.Opts.PreserveDevices && isDev) ||
+		(rt.Opts.PreserveSpecials && isSpecial && rt.ProtocolVersion() < 31) {
+		if rt.ProtocolVersion() < 28 {
+			if flags&rsync.XMIT_SAME_RDEV_pre28 != 0 {
+				f.Rdev = last.Rdev
+			} else {
+				rdev, err := rt.Conn.ReadInt32()
+				if err != nil {
+					return nil, err
+				}
+				f.Rdev = rdev
 			}
-			f.Rdev = rdev
+		} else {
+			// rsync/flist.c:recv_file_entry, protocol >= 28: the device
+			// number is sent as separate major/minor parts.
+			if flags&rsync.XMIT_SAME_RDEV_MAJOR == 0 {
+				if rt.ProtocolVersion() < 30 {
+					major, err := rt.Conn.ReadInt32()
+					if err != nil {
+						return nil, err
+					}
+					rt.rdevMajor = major
+				} else {
+					// TODO(protocol >= 30): varint
+					major, err := rt.Conn.ReadInt32()
+					if err != nil {
+						return nil, err
+					}
+					rt.rdevMajor = major
+				}
+			}
+			f.RdevMajor = rt.rdevMajor
+			switch {
+			case rt.ProtocolVersion() >= 30:
+				// TODO(protocol >= 30): varint
+				minor, err := rt.Conn.ReadInt32()
+				if err != nil {
+					return nil, err
+				}
+				f.RdevMinor = minor
+			case flags&rsync.XMIT_RDEV_MINOR_IS_SMALL != 0:
+				minor, err := rt.Conn.ReadByte()
+				if err != nil {
+					return nil, err
+				}
+				f.RdevMinor = int32(minor)
+			default:
+				minor, err := rt.Conn.ReadInt32()
+				if err != nil {
+					return nil, err
+				}
+				f.RdevMinor = minor
+			}
+			f.Rdev = makedev(f.RdevMajor, f.RdevMinor)
 		}
 	}
 
@@ -196,7 +270,11 @@ func (rt *Transfer) receiveFileEntry(flags uint16, last *File) (*File, error) {
 		f.LinkTarget = string(b)
 	}
 
-	if rt.Opts.AlwaysChecksum {
+	// rsync/flist.c:recv_file_entry: with protocol >= 28, the whole-file
+	// checksum is only transmitted for regular files (other entry types
+	// carry an empty checksum).
+	if rt.Opts.AlwaysChecksum &&
+		(mode == rsync.S_IFREG || rt.ProtocolVersion() < 28) {
 		if _, err := io.ReadFull(rt.Conn.Reader, f.Checksum[:]); err != nil {
 			return nil, err
 		}
@@ -222,8 +300,15 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 			break
 		}
 		flags := uint16(b)
-		// rt.Logger.Printf("flags: %x", flags)
-		// TODO(protocol >= 28): extended flags
+		// rsync/flist.c:recv_file_list: with protocol >= 28, the extended
+		// flags byte follows when XMIT_EXTENDED_FLAGS is set.
+		if rt.ProtocolVersion() >= 28 && flags&rsync.XMIT_EXTENDED_FLAGS != 0 {
+			ext, err := rt.Conn.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			flags |= uint16(ext) << 8
+		}
 
 		f, err := rt.receiveFileEntry(flags, lastFileEntry)
 		if err != nil {
@@ -251,7 +336,7 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 		fmt.Fprintf(rt.Env.Stdout, "\r%d files to consider\n", len(fileList))
 	}
 
-	sortFileList(fileList)
+	rt.sortFileList(fileList)
 
 	if rt.Opts.PreserveUid || rt.Opts.PreserveGid {
 		// receive the uid/gid list

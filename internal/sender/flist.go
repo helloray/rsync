@@ -7,12 +7,14 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
@@ -24,6 +26,11 @@ type file struct {
 	Wpath   string
 	regular bool
 
+	// Flags is the low byte of the xmit flags (TOP_DIR, LONG_NAME),
+	// computed during the walk. High-byte flags (protocol >= 28) are
+	// derived at encode time from the fields below.
+	Flags byte
+
 	// fields below are used by the receiver (TODO: unify)
 	Name       string
 	Length     int64
@@ -33,6 +40,13 @@ type file struct {
 	Gid        int32
 	LinkTarget string
 	Rdev       int32
+	RdevMajor  int32
+	RdevMinor  int32
+	Checksum   [rsyncchecksum.Size]byte
+}
+
+func (f *file) isDir() bool {
+	return f.Mode&rsync.S_IFMT == rsync.S_IFDIR
 }
 
 type fileList struct {
@@ -78,8 +92,6 @@ func getStrip(requested string) string {
 type scopedWalker struct {
 	st        *Transfer
 	ioError   func(err error)
-	conn      *rsyncwire.Conn
-	fec       *rsyncwire.Buffer
 	excl      *filterRuleList
 	uidMap    map[int32]string
 	gidMap    map[int32]string
@@ -187,27 +199,6 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		return filepath.SkipDir
 	}
 
-	s.fileList.Files = append(s.fileList.Files, file{
-		source:  s.source,
-		path:    path,
-		regular: info.Mode().IsRegular(),
-		Wpath:   name,
-		Length:  info.Size(),
-	})
-
-	s.fec.Reset()
-
-	// 1.   status byte (integer)
-	s.fec.WriteByte(flags)
-
-	// 2.   inherited filename length (optional, byte)
-	// 3.   filename length (integer or byte)
-	s.fec.WriteInt32(int32(len(name)))
-
-	// 4.   file (byte array)
-	s.fec.WriteString(name)
-
-	// 5.   file length (long)
 	size := info.Size()
 	if info.Mode().IsDir() {
 		// tmpfs returns non-4K sizes for directories. Override with
@@ -215,15 +206,8 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		// system type.
 		size = 4096
 	}
-	s.fec.WriteInt64(size)
-
 	s.fileList.TotalSize += size
 
-	// 6.   file modification time (optional, integer)
-	// TODO: this will overflow in 2038! :(
-	s.fec.WriteInt32(int32(info.ModTime().Unix()))
-
-	// 7.   file mode (optional, mode_t, integer)
 	mode := int32(info.Mode() & os.ModePerm)
 	isDev := false
 	isSpecial := false
@@ -254,7 +238,16 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		isSpecial = true
 	}
 
-	s.fec.WriteInt32(mode)
+	f := file{
+		source:  s.source,
+		path:    path,
+		regular: info.Mode().IsRegular(),
+		Wpath:   name,
+		Flags:   flags,
+		Length:  size,
+		ModTime: info.ModTime(),
+		Mode:    mode,
+	}
 
 	if opts.PreserveUid() {
 		uid, ok := uidFromFileInfo(info)
@@ -270,8 +263,7 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 				}
 			}
 		}
-		// 8.   if -o, the user id (integer)
-		s.fec.WriteInt32(uid)
+		f.Uid = uid
 	}
 
 	if opts.PreserveGid() {
@@ -288,67 +280,60 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 				}
 			}
 		}
-		// 9.   if -g, the group id (integer)
-		s.fec.WriteInt32(gid)
+		f.Gid = gid
 	}
 
 	if (opts.PreserveDevices() && isDev) ||
 		(opts.PreserveSpecials() && isSpecial) {
-		// 10.  if a special file and -D, the device “rdev” type (integer)
 		rdev, _ := rdevFromFileInfo(info)
-		s.fec.WriteInt32(rdev)
+		f.Rdev = rdev
+		f.RdevMajor, f.RdevMinor = rdevMajorMinor(rdev)
 	}
 
 	if opts.PreserveLinks() && info.Mode().Type()&os.ModeSymlink != 0 {
-		// 11.  if a symbolic link and -l, the link target's length (integer)
-		// 12.  if a symbolic link and -l, the link target (byte array)
-
 		target, err := s.source.Readlink(path)
 		if err != nil {
 			return err // TODO
 		}
-		s.fec.WriteInt32(int32(len(target)))
-		s.fec.WriteString(target)
+		f.LinkTarget = target
 	}
 
 	if opts.AlwaysChecksum() {
 		var emptyChecksum [rsyncchecksum.Size]byte
 		checksum := emptyChecksum[:]
 		if info.Mode().IsRegular() {
-			f, err := s.source.Open(path)
+			fh, err := s.source.Open(path)
 			if err != nil {
 				return err
 			}
-			checksum, err = rsyncchecksum.ReaderChecksum(f)
-			f.Close()
+			checksum, err = rsyncchecksum.ReaderChecksum(fh)
+			fh.Close()
 			if err != nil {
 				return err
 			}
 		} else {
 			// send empty md4 checksum
 		}
-		s.fec.WriteString(string(checksum))
+		copy(f.Checksum[:], checksum)
 	}
 
-	s.conn.WriteString(s.fec.String())
-
-	// The status byte may consist of the following bits and determines which of the optional fields are transmitted.
-
-	// 0x01    A top-level directory.  (Only applies to directory files.)  If specified, the matching local directory is for deletions.
-	// 0x02    Do not send the file mode: it is a repeat of the last file's mode.
-	// 0x08    Like 0x02, but for the user id.
-	// 0x10    Like 0x02, but for the group id.
-	// 0x20    Inherit some of the prior file name.  Enables the inherited filename length transmission.
-	// 0x40    Use full integer length for file name.  Otherwise, use only the byte length.
-	// 0x80    Do not send the file modification time: it is a repeat of the last file's.
-
-	// If the status byte is zero, the file-list has terminated.
+	s.fileList.Files = append(s.fileList.Files, f)
 
 	if info.Mode().IsDir() && !opts.Recurse() {
 		return filepath.SkipDir
 	}
 
 	return nil
+}
+
+// rdevMajorMinor splits a device number into its major/minor parts,
+// inverting the glibc makedev() composition (see receiver.makedev).
+// Device numbers with a major >= 4096 are not covered.
+func rdevMajorMinor(rdev int32) (int32, int32) {
+	u := uint32(rdev)
+	major := int32(u>>8) & 0xfff
+	minor := int32(u)&0xff | int32(u>>12)&^0xff
+	return major, minor
 }
 
 // rsync/flist.c:send_file_list
@@ -413,8 +398,6 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 
 		sw := &scopedWalker{
 			st:        st,
-			conn:      st.Conn,
-			fec:       fec,
 			excl:      excl,
 			uidMap:    uidMap,
 			gidMap:    gidMap,
@@ -434,6 +417,139 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 
 	if st.Opts.InfoGTE(rsyncopts.INFO_PROGRESS, 1) {
 		st.Logger.Printf("%d files to consider", len(fileList.Files))
+	}
+
+	// rsync/flist.c:send_file_list calls flist_sort_and_clean() before
+	// transmission. For protocol >= 29 this orders directory contents
+	// after plain entries at each level (f_name_cmp), and both C sides
+	// sort identically, so the file indices stay aligned. Mirror that
+	// order here.
+	if !protocol.UsesOldPrefixes(st.Opts.ProtocolVersion()) {
+		sort.Slice(fileList.Files, func(i, j int) bool {
+			a, b := &fileList.Files[i], &fileList.Files[j]
+			return protocol.FNameCmp(a.Wpath, a.isDir(), b.Wpath, b.isDir()) < 0
+		})
+	}
+
+	rdevMajor := int32(0)
+	for i := range fileList.Files {
+		f := &fileList.Files[i]
+
+		fec.Reset()
+
+		mode := f.Mode & rsync.S_IFMT
+		isDev := mode == rsync.S_IFCHR || mode == rsync.S_IFBLK
+		isSpecial := mode == rsync.S_IFIFO || mode == rsync.S_IFSOCK
+		sendRdev := (st.Opts.PreserveDevices() && isDev) ||
+			(st.Opts.PreserveSpecials() && isSpecial)
+
+		// 1.   status byte (integer)
+		xflags := uint16(f.Flags)
+		sameRdevMajor := false
+		minorIsSmall := false
+		minor := f.RdevMinor
+		if sendRdev && st.Opts.ProtocolVersion() >= 28 {
+			if isSpecial {
+				// rsync/flist.c:send_file_entry: special files don't
+				// need an rdev number, so just make the historical
+				// transmission of the value efficient.
+				minor = 0
+				sameRdevMajor = true
+				minorIsSmall = true
+			} else {
+				sameRdevMajor = f.RdevMajor == rdevMajor
+				minorIsSmall = f.RdevMinor <= 0xFF
+			}
+			if sameRdevMajor {
+				xflags |= rsync.XMIT_SAME_RDEV_MAJOR
+			}
+			if minorIsSmall {
+				xflags |= rsync.XMIT_RDEV_MINOR_IS_SMALL
+			}
+		}
+		if st.Opts.ProtocolVersion() >= 28 {
+			// rsync/flist.c:send_file_entry: with protocol >= 28, emit
+			// the flags as a shortint when the high byte is needed (or
+			// the low byte would be zero), so that the receiver can
+			// tell the two apart.
+			if xflags == 0 && !f.isDir() {
+				xflags |= rsync.XMIT_TOP_DIR
+			}
+			if xflags&0xFF00 != 0 || xflags == 0 {
+				xflags |= rsync.XMIT_EXTENDED_FLAGS
+				fec.WriteShortint(xflags)
+			} else {
+				fec.WriteByte(byte(xflags))
+			}
+		} else {
+			fec.WriteByte(byte(xflags))
+		}
+
+		// 2.   inherited filename length (optional, byte)
+		// 3.   filename length (integer or byte)
+		// Only ever transmit long names, like openrsync
+		fec.WriteInt32(int32(len(f.Wpath)))
+
+		// 4.   file (byte array)
+		fec.WriteString(f.Wpath)
+
+		// 5.   file length (long)
+		fec.WriteInt64(f.Length)
+
+		// 6.   file modification time (optional, integer)
+		// TODO: this will overflow in 2038! :(
+		fec.WriteInt32(int32(f.ModTime.Unix()))
+
+		// 7.   file mode (optional, mode_t, integer)
+		fec.WriteInt32(f.Mode)
+
+		if st.Opts.PreserveUid() {
+			// 8.   if -o, the user id (integer)
+			fec.WriteInt32(f.Uid)
+		}
+
+		if st.Opts.PreserveGid() {
+			// 9.   if -g, the group id (integer)
+			fec.WriteInt32(f.Gid)
+		}
+
+		if sendRdev {
+			// 10.  if a special file and -D, the device “rdev” type
+			if st.Opts.ProtocolVersion() < 28 {
+				fec.WriteInt32(f.Rdev)
+			} else {
+				// rsync/flist.c:send_file_entry, protocol >= 28: the
+				// device number is sent as separate major/minor parts.
+				if !sameRdevMajor {
+					rdevMajor = f.RdevMajor
+					fec.WriteInt32(rdevMajor)
+				}
+				if minorIsSmall {
+					fec.WriteByte(byte(minor))
+				} else {
+					fec.WriteInt32(minor)
+				}
+			}
+		}
+
+		if st.Opts.PreserveLinks() && mode == rsync.S_IFLNK {
+			// 11.  if a symbolic link and -l, the link target's length (integer)
+			// 12.  if a symbolic link and -l, the link target (byte array)
+			fec.WriteInt32(int32(len(f.LinkTarget)))
+			fec.WriteString(f.LinkTarget)
+		}
+
+		// rsync/flist.c:send_file_entry: with protocol >= 28, the whole-file
+		// checksum is only transmitted for regular files (other entry types
+		// carry an empty checksum).
+		if st.Opts.AlwaysChecksum() &&
+			(mode == rsync.S_IFREG || st.Opts.ProtocolVersion() < 28) {
+			fec.WriteString(string(f.Checksum[:]))
+		}
+
+		if err := st.Conn.WriteString(fec.String()); err != nil {
+			return nil, err
+		}
 	}
 
 	fec.Reset()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsynccommon"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -39,6 +40,18 @@ func (rt *Transfer) GenerateFiles(fileList []*File) error {
 	}
 	if err := rt.Conn.WriteInt32(-1); err != nil {
 		return err
+	}
+
+	// rsync/generator.c:2882-2890: with protocol >= 29, the generator
+	// closes a third (delay-updates) phase.
+	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {
+		phase++
+		if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
+			rt.Logger.Printf("generateFiles phase=%d", phase)
+		}
+		if err := rt.Conn.WriteInt32(-1); err != nil {
+			return err
+		}
 	}
 
 	// NOTE: touchUpDirs is called from [Transfer.Do]
@@ -249,7 +262,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 			rt.Logger.Printf("requesting: %s", f.Name)
 		}
-		if err := rt.Conn.WriteInt32(int32(idx)); err != nil {
+		if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
 		if rt.Opts.DryRun {
@@ -268,7 +281,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 			if pin, psize, ok := rt.openPartialBasis(f); ok {
 				defer pin.Close()
 				rt.Logger.Printf("resuming %s from partial (%d bytes)", f.Name, psize)
-				if err := rt.Conn.WriteInt32(int32(idx)); err != nil {
+				if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
 					return err
 				}
 				return rt.generateAndSendSums(pin, psize)
@@ -306,7 +319,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 	}
 
 	if rt.Opts.DryRun {
-		if err := rt.Conn.WriteInt32(int32(idx)); err != nil {
+		if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
 
@@ -325,7 +338,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 		rt.Logger.Printf("sending sums for: %s", f.Name)
 	}
-	if err := rt.Conn.WriteInt32(int32(idx)); err != nil {
+	if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
 		return err
 	}
 

@@ -17,6 +17,37 @@ const (
 	XMIT_RDEV_MINOR_IS_SMALL = (1 << 11)
 )
 
+// rsync/rsync.h: itemize flags, exchanged as a shortint (2 bytes
+// little-endian) after the file index when protocol_version >= 29.
+const (
+	ITEM_REPORT_ATIME      = (1 << 0)
+	ITEM_REPORT_CHANGE     = (1 << 1)
+	ITEM_REPORT_SIZE       = (1 << 2) /* regular files only */
+	ITEM_REPORT_TIMEFAIL   = (1 << 2) /* symlinks only */
+	ITEM_REPORT_TIME       = (1 << 3)
+	ITEM_REPORT_PERMS      = (1 << 4)
+	ITEM_REPORT_OWNER      = (1 << 5)
+	ITEM_REPORT_GROUP      = (1 << 6)
+	ITEM_REPORT_ACL        = (1 << 7)
+	ITEM_REPORT_XATTR      = (1 << 8)
+	ITEM_REPORT_CRTIME     = (1 << 10)
+	ITEM_BASIS_TYPE_FOLLOWS = (1 << 11)
+	ITEM_XNAME_FOLLOWS      = (1 << 12)
+	ITEM_IS_NEW             = (1 << 13)
+	ITEM_LOCAL_CHANGE       = (1 << 14)
+	ITEM_TRANSFER           = (1 << 15)
+)
+
+// rsync/rsync.h:FNAMECMP_*
+const (
+	FNAMECMP_BASIS_DIR_LOW = 0x00 /* Must remain 0! */
+	FNAMECMP_BASIS_DIR_HIGH = 0x7F
+	FNAMECMP_FNAME          = 0x80
+	FNAMECMP_PARTIAL_DIR    = 0x81
+	FNAMECMP_BACKUP         = 0x82
+	FNAMECMP_FUZZY          = 0x83
+)
+
 // as per /usr/include/bits/stat.h:
 const (
 	S_IFMT   = 0o0170000 // bits determining the file type
@@ -30,7 +61,14 @@ const (
 )
 
 // ProtocolVersion defines the currently implemented rsync protocol
-// version. Protocol version 27 seems to be the safest bet for wide
-// compatibility: version 27 was introduced by rsync 2.6.0 (released 2004), and
-// is supported by openrsync and rsyn.
-const ProtocolVersion = 27
+// version.
+//
+// History: this implementation originally spoke protocol 27 (rsync 2.6.0,
+// released 2004). Protocol 29 (rsync 2.6.7) is the oldest version that
+// tridge rsync 3.x still accepts, so upgrading to 29 makes interoperability
+// testing against C rsync 3.x possible.
+const ProtocolVersion = 29
+
+// ProtocolVersionMin is the oldest protocol version we are willing to
+// speak, matching rsync’s MIN_PROTOCOL_VERSION.
+const ProtocolVersionMin = 27

@@ -281,6 +281,11 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 		if opts.Verbose() {
 			osenv.Logf("remote protocol: %d", remoteProtocol)
 		}
+		if remoteProtocol < rsync.ProtocolVersionMin {
+			return nil, fmt.Errorf("protocol version mismatch: remote %d is older than minimum %d",
+				remoteProtocol, rsync.ProtocolVersionMin)
+		}
+		opts.SetProtocolVersion(int(min(remoteProtocol, int32(rsync.ProtocolVersion))))
 	}
 
 	seed, err := c.ReadInt32()
@@ -374,6 +379,8 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 			DebugGTE: opts.DebugGTE,
 
 			KeepPartial: opts.KeepPartial(),
+
+			ProtocolVersion: opts.ProtocolVersion(),
 		},
 		Dest:     paths[0],
 		Env:      osenv,

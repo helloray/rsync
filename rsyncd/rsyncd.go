@@ -332,6 +332,9 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	if effectiveProtocolVersion > rsync.ProtocolVersion {
 		effectiveProtocolVersion = rsync.ProtocolVersion
 	}
+	if effectiveProtocolVersion < rsync.ProtocolVersionMin {
+		effectiveProtocolVersion = rsync.ProtocolVersionMin
+	}
 	s.logger.Printf("protocol negotiation: server=%d, client=%d, effective=%d", rsync.ProtocolVersion, clientProtocolVersion, effectiveProtocolVersion)
 	// TODO: full protocol negotiation
 
@@ -408,6 +411,7 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 		return err
 	}
 	remaining := pc.RemainingArgs
+	pc.Options.SetProtocolVersion(effectiveProtocolVersion)
 	s.logger.Printf("remaining: %q", remaining)
 	// remaining[0] is always "."
 	// remaining[1] is the first directory
@@ -503,16 +507,24 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 	}
 
 	if negotiate {
+		// Note: C rsync sends its version before reading the peer’s
+		// (rsync/compat.c:setup_protocol), but either order works over
+		// TCP (and we must not deadlock on unbuffered pipes).
 		remoteProtocol, err := c.ReadInt32()
 		if err != nil {
+			return err
+		}
+		if err := c.WriteInt32(rsync.ProtocolVersion); err != nil {
 			return err
 		}
 		if opts.DebugGTE(rsyncopts.DEBUG_PROTO, 1) {
 			s.logger.Printf("remote protocol: %d", remoteProtocol)
 		}
-		if err := c.WriteInt32(rsync.ProtocolVersion); err != nil {
-			return err
+		if remoteProtocol < rsync.ProtocolVersionMin {
+			return fmt.Errorf("protocol version mismatch: remote %d is older than minimum %d",
+				remoteProtocol, rsync.ProtocolVersionMin)
 		}
+		opts.SetProtocolVersion(int(min(remoteProtocol, int32(rsync.ProtocolVersion))))
 	}
 
 	if err := c.WriteInt32(sessionChecksumSeed); err != nil {
@@ -598,6 +610,8 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 			DebugGTE: opts.DebugGTE,
 
 			KeepPartial: opts.KeepPartial(),
+
+			ProtocolVersion: opts.ProtocolVersion(),
 		},
 		Dest: module.Path,
 		Env: &rsyncos.Env{

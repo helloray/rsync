@@ -8,12 +8,52 @@ import (
 	"sort"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsynccommon"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/mmcloughlin/md4"
 	"golang.org/x/sync/errgroup"
 )
+
+// writeNdxTransfer sends a transfer request index to the receiver, like
+// rsync/sender.c:write_ndx_and_attrs with iflags=ITEM_TRANSFER
+// (rsync/io.c:write_ndx falls back to a plain int32 for protocol < 30).
+func (st *Transfer) writeNdxTransfer(fileIndex int32) error {
+	if err := st.Conn.WriteInt32(fileIndex); err != nil {
+		return err
+	}
+	if !protocol.SupportsIFlags(st.Opts.ProtocolVersion()) {
+		return nil
+	}
+	return st.Conn.WriteShortint(rsync.ITEM_TRANSFER)
+}
+
+// writeNdxAndAttrs echoes a file index and its itemize flags to the
+// receiver, like rsync/sender.c:write_ndx_and_attrs (rsync/io.c:write_ndx
+// falls back to a plain int32 for protocol < 30).
+func (st *Transfer) writeNdxAndAttrs(fileIndex int32, iflags uint16, fnamecmpType byte) error {
+	if err := st.Conn.WriteInt32(fileIndex); err != nil {
+		return err
+	}
+	if !protocol.SupportsIFlags(st.Opts.ProtocolVersion()) {
+		return nil
+	}
+	if err := st.Conn.WriteShortint(iflags); err != nil {
+		return err
+	}
+	if iflags&rsync.ITEM_BASIS_TYPE_FOLLOWS != 0 {
+		if err := st.Conn.WriteByte(fnamecmpType); err != nil {
+			return err
+		}
+	}
+	if iflags&rsync.ITEM_XNAME_FOLLOWS != 0 {
+		if err := st.Conn.WriteVString(""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // rsync/sender.c:send_files()
 func (st *Transfer) SendFiles(fileList *fileList) error {
@@ -27,19 +67,70 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			return err
 		}
 		if fileIndex == -1 {
-			if phase == 0 {
-				phase++
-				// acknowledge phase change by sending -1
-				if err := st.Conn.WriteInt32(-1); err != nil {
-					return err
-				}
+			phase++
+			// rsync/sender.c:send_files: max_phase is 2 with protocol >= 29,
+			// so the sender reads three phase-done markers in total,
+			// acknowledging the first two with an echo and breaking on the
+			// third (whose final acknowledgment is written below the loop).
+			maxPhase := 1
+			if protocol.SupportsMultiPhase(st.Opts.ProtocolVersion()) {
+				maxPhase = 2
+			}
+			if phase > maxPhase {
+				break
+			}
+			// acknowledge phase change by sending -1
+			if err := st.Conn.WriteInt32(-1); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// rsync/rsync.c:read_ndx_and_attrs: with protocol >= 29, the file
+		// index is followed by the itemize iflags shortint, optionally the
+		// basis type byte and the xname vstring.
+		iflags := uint16(rsync.ITEM_TRANSFER)
+		fnamecmpType := byte(rsync.FNAMECMP_FNAME)
+		if protocol.SupportsIFlags(st.Opts.ProtocolVersion()) {
+			iflags, err = st.Conn.ReadShortint()
+			if err != nil {
+				return err
+			}
+			// rsync/rsync.c:read_ndx_and_attrs: support the protocol-29
+			// keep-alive style (index == list length, iflags == ITEM_IS_NEW).
+			if st.Opts.ProtocolVersion() < 30 &&
+				int(fileIndex) == len(fileList.Files) &&
+				iflags == rsync.ITEM_IS_NEW {
 				continue
 			}
-			break
+			if iflags&rsync.ITEM_BASIS_TYPE_FOLLOWS != 0 {
+				fnamecmpType, err = st.Conn.ReadByte()
+				if err != nil {
+					return err
+				}
+			}
+			if iflags&rsync.ITEM_XNAME_FOLLOWS != 0 {
+				if _, err := st.Conn.ReadVString(); err != nil {
+					return err
+				}
+			}
+		}
+		if fileIndex < 0 || int(fileIndex) >= len(fileList.Files) {
+			return fmt.Errorf("invalid file index %d (list has %d entries)",
+				fileIndex, len(fileList.Files))
+		}
+
+		// rsync/sender.c:send_files: echo itemize messages that do not
+		// carry data (e.g. attribute-only updates) back to the receiver.
+		if iflags&rsync.ITEM_TRANSFER == 0 {
+			if err := st.writeNdxAndAttrs(fileIndex, iflags, fnamecmpType); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if st.Opts.DryRun() {
-			if err := st.Conn.WriteInt32(fileIndex); err != nil {
+			if err := st.writeNdxAndAttrs(fileIndex, iflags, fnamecmpType); err != nil {
 				return err
 			}
 			continue
@@ -151,9 +242,11 @@ func (st *Transfer) receiveSums() (rsync.SumHead, error) {
 }
 
 func (st *Transfer) sendFile(fileIndex int32, fl file) error {
-	// rsync/rsync.h defines chunkSize as 32 * 1024, but increasing it to 256K
-	// increases throughput with “tridge” rsync as client by 50 Mbit/s.
-	const chunkSize = 256 * 1024
+	// rsync/rsync.h defines chunkSize as 32 * 1024. C rsync rejects a
+	// single uncompressed token longer than 32 KiB ("invalid uncompressed
+	// token length"), so we must not exceed this when sending the whole
+	// file to a tridge rsync receiver.
+	const chunkSize = 32 * 1024
 
 	f, err := fl.source.Open(fl.path)
 	if err != nil {
@@ -166,7 +259,7 @@ func (st *Transfer) sendFile(fileIndex int32, fl file) error {
 		return err
 	}
 
-	if err := st.Conn.WriteInt32(fileIndex); err != nil {
+	if err := st.writeNdxTransfer(fileIndex); err != nil {
 		return err
 	}
 
