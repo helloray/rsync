@@ -594,7 +594,7 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 			}
 		}()
 
-		return s.handleConnSender(module, crd, cwr, paths, opts, false, c, sessionChecksumSeed)
+		return s.handleConnSender(module, crd, cwr, paths, opts, false, c, sessionChecksumSeed, sess)
 	}
 
 	// If returning an error, send the error to the client for display, too:
@@ -603,11 +603,11 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 			mpx.WriteMsg(rsyncwire.MsgError, fmt.Appendf(nil, "gokr-rsync [receiver]: %v\n", err))
 		}
 	}()
-	return s.handleConnReceiver(module, crd, cwr, paths, opts, false, c, sessionChecksumSeed)
+	return s.handleConnReceiver(module, crd, cwr, paths, opts, false, c, sessionChecksumSeed, sess)
 }
 
 // handleConnReceiver is equivalent to rsync/main.c:do_server_recv
-func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWriter, paths []string, opts *rsyncopts.Options, negotiate bool, c *rsyncwire.Conn, sessionChecksumSeed int32) (err error) {
+func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWriter, paths []string, opts *rsyncopts.Options, negotiate bool, c *rsyncwire.Conn, sessionChecksumSeed int32, sess *protocol.Session) (err error) {
 	var destPath string
 	implicitModule := module == nil
 	if implicitModule {
@@ -630,7 +630,8 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 	}
 
 	rt := &receiver.Transfer{
-		Logger: s.logger,
+		Logger:  s.logger,
+		Session: sess,
 		Opts: &receiver.TransferOpts{
 			DryRun:   opts.DryRun(),
 			Server:   opts.Server(),
@@ -747,7 +748,7 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 }
 
 // handleConnSender is equivalent to rsync/main.c:do_server_sender
-func (s *Server) handleConnSender(module *Module, crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWriter, paths []string, opts *rsyncopts.Options, negotiate bool, c *rsyncwire.Conn, sessionChecksumSeed int32) (err error) {
+func (s *Server) handleConnSender(module *Module, crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWriter, paths []string, opts *rsyncopts.Options, negotiate bool, c *rsyncwire.Conn, sessionChecksumSeed int32, sess *protocol.Session) (err error) {
 	if module == nil {
 		module = &Module{
 			Name: "implicit",
@@ -756,10 +757,11 @@ func (s *Server) handleConnSender(module *Module, crd *rsyncwire.CountingReader,
 	}
 
 	st := &sender.Transfer{
-		Logger: s.logger,
-		Opts:   opts,
-		Conn:   c,
-		Seed:   sessionChecksumSeed,
+		Logger:  s.logger,
+		Opts:    opts,
+		Session: sess,
+		Conn:    c,
+		Seed:    sessionChecksumSeed,
 		Env: &rsyncos.Env{
 			Stderr: s.stderr,
 		},

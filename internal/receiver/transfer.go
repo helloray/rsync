@@ -59,6 +59,11 @@ type Transfer struct {
 	Env      *rsyncos.Env
 	Progress progress.Printer
 
+	// Session carries the negotiated protocol state (version, compatibility
+	// flags, checksum contract) from the handshake. It drives the flist codec
+	// and per-file message framing.
+	Session *protocol.Session
+
 	// state
 	Conn            *rsyncwire.Conn
 	Seed            int32

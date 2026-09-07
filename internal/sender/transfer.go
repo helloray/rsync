@@ -5,6 +5,7 @@ import (
 
 	"github.com/gokrazy/rsync/internal/log"
 	"github.com/gokrazy/rsync/internal/progress"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncos"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
@@ -40,6 +41,11 @@ type Transfer struct {
 	Env      *rsyncos.Env
 	Progress progress.Printer
 	Source   FileSource // for modules specifying a fs.FS
+
+	// Session carries the negotiated protocol state (version, compatibility
+	// flags, checksum contract) from the handshake. It drives the flist codec
+	// and per-file message framing.
+	Session *protocol.Session
 
 	// state
 	Conn      *rsyncwire.Conn

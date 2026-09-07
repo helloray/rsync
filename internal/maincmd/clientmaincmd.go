@@ -338,6 +338,7 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 		st := &sender.Transfer{
 			Logger:   osenv.Logger(),
 			Opts:     opts,
+			Session:  sess,
 			Conn:     c,
 			Seed:     seed,
 			Env:      osenv,
@@ -376,7 +377,8 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 	}
 
 	rt := &receiver.Transfer{
-		Logger: osenv.Logger(),
+		Logger:  osenv.Logger(),
+		Session: sess,
 		Opts: &receiver.TransferOpts{
 			Verbose:  opts.Verbose(),
 			DryRun:   opts.DryRun(),
