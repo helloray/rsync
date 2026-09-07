@@ -10,12 +10,56 @@ import (
 )
 
 const (
-	MsgData  uint8 = 0
-	MsgInfo  uint8 = 2
-	MsgError uint8 = 1
+	// Message codes mirror rsync.h: `enum msgcode` (MPLEX_BASE=7 is added
+	// to these to form the wire tag byte).
+	MsgData       uint8 = 0
+	MsgErrorXfer  uint8 = 1
+	MsgInfo       uint8 = 2
+	MsgError      uint8 = 3
+	MsgWarning    uint8 = 4
+	MsgErrorSock  uint8 = 5
+	MsgLog        uint8 = 6
+	MsgClient     uint8 = 7
+	MsgErrorUtf8  uint8 = 8
+	MsgRedo       uint8 = 9
+	MsgStats      uint8 = 10
+	MsgIoError    uint8 = 22
+	MsgIoTimeout  uint8 = 33
+	MsgNoOp       uint8 = 42
+	MsgErrorExit  uint8 = 86
+	MsgSuccess    uint8 = 100
+	MsgDeleted    uint8 = 101
+	MsgNoSend     uint8 = 102
 )
 
 const mplexBase = 7
+
+// ControlFrameError reports that a multiplex frame carrying a control message
+// (per-file Success/Deleted/NoSend, ErrorExit, Stats, or similar) was read
+// where DATA was expected. The receiver routing layer can inspect Tag and
+// Payload to dispatch the message. At protocol < 30 these frames never appear
+// where the io.Reader view is used, so plain < 30 transfers never see them.
+type ControlFrameError struct {
+	Tag     uint8
+	Payload []byte
+}
+
+func (e *ControlFrameError) Error() string {
+	return fmt.Sprintf("mplex control message tag %d (len %d)", e.Tag, len(e.Payload))
+}
+
+// IsSwallowable reports whether the frame carries no data of its own and
+// should be consumed and dropped by the DATA reader: a keep-alive no-op, an
+// informational message we already logged, or an empty DATA heartbeat.
+func isSwallowable(tag uint8, payload []byte) bool {
+	switch tag {
+	case MsgInfo, MsgNoOp:
+		return true
+	case MsgData:
+		return len(payload) == 0
+	}
+	return false
+}
 
 type MultiplexWriter struct {
 	Writer io.WriteCloser
@@ -76,18 +120,36 @@ func (w *MultiplexReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Fatal/error messages terminate the session; surface them.
 	switch tag {
-	case MsgError:
-		return 0, fmt.Errorf("%s", payload)
-	case MsgInfo:
-		w.Env.Logf("info: %s", payload)
-		// io.ReadFull will call Read again
+	case MsgError, MsgErrorXfer, MsgIoError, MsgErrorExit:
+		return 0, fmt.Errorf("rsync error (msg tag %d): %s", tag, payload)
+	}
+
+	// Frames that carry no data of their own (keep-alive, info we logged, or
+	// an empty DATA heartbeat) are consumed and dropped so the next Read
+	// sees the following frame (io.ReadFull handles 0-,nil reads by retrying).
+	if isSwallowable(tag, payload) {
+		if tag == MsgInfo {
+			w.Env.Logf("info: %s", payload)
+		}
 		return 0, nil
+	}
+
+	// Per-file control messages (Success/Deleted/NoSend), Stats, and any
+	// other control frame carry data that must be routed to the correct
+	// consumer; they cannot be silently discarded as DATA.
+	switch tag {
 	case MsgData:
 		// continues below
+	case MsgSuccess, MsgDeleted, MsgNoSend, MsgRedo, MsgStats,
+		MsgErrorSock, MsgLog, MsgClient, MsgErrorUtf8, MsgWarning, MsgIoTimeout:
+		return 0, &ControlFrameError{Tag: tag, Payload: payload}
 	default:
-		return 0, fmt.Errorf("unexpected tag: got %v, want %v", tag, MsgData)
+		return 0, fmt.Errorf("unexpected msg tag: got %v, want %v", tag, MsgData)
 	}
+
 	if len(p) < len(payload) {
 		panic(fmt.Sprintf("not enough buffer space! %d < %d", len(p), len(payload)))
 	}
@@ -140,6 +202,9 @@ type Conn struct {
 	Writer io.WriteCloser
 	Reader io.ReadCloser
 }
+
+func (c *Conn) Read(p []byte) (int, error)  { return c.Reader.Read(p) }
+func (c *Conn) Write(p []byte) (int, error) { return c.Writer.Write(p) }
 
 func (c *Conn) Close() error {
 	wcErr := c.Writer.Close()

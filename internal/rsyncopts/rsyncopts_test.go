@@ -232,3 +232,72 @@ func TestParseArgumentsRemaining(t *testing.T) {
 		})
 	}
 }
+
+// TestServerOptionsClientInfo verifies the client's -e client_info flags (the
+// "e." + "i" + capability letters appended to the server argstr) that let the
+// server derive compatibility flags and allow incremental recursion.
+
+func TestServerOptionsClientInfo(t *testing.T) {
+	findToken := func(t *testing.T, argv []string, want string) {
+		t.Helper()
+		for _, a := range argv {
+			if a == want {
+				return
+			}
+		}
+		t.Fatalf("argv %q does not contain token %q", argv, want)
+	}
+
+	t.Run("proto29_no_client_info", func(t *testing.T) {
+		o := NewOptions(rsyncostest.New(t))
+		o.protocol_version = 29
+		o.recurse = 2
+		for _, a := range o.ServerOptions() {
+			if strings.Contains(a, "e.L") {
+				t.Fatalf("protocol 29 must not emit -e client_info, got %q", a)
+			}
+		}
+	})
+
+	t.Run("proto30_receiver_inc", func(t *testing.T) {
+		o := NewOptions(rsyncostest.New(t))
+		o.protocol_version = 30
+		o.recurse = 2
+		findToken(t, o.ServerOptions(), "-re.iLfxCvIu")
+	})
+
+	t.Run("proto30_receiver_no_inc_delete_before", func(t *testing.T) {
+		o := NewOptions(rsyncostest.New(t))
+		o.protocol_version = 30
+		o.recurse = 2
+		o.delete_before = 1
+		findToken(t, o.ServerOptions(), "-re.LfxCvIu")
+	})
+
+	t.Run("proto30_no_recurse", func(t *testing.T) {
+		o := NewOptions(rsyncostest.New(t))
+		o.protocol_version = 30
+		findToken(t, o.ServerOptions(), "-e.LfxCvIu")
+	})
+
+	t.Run("proto30_sender_inc", func(t *testing.T) {
+		o := NewOptions(rsyncostest.New(t))
+		o.protocol_version = 30
+		o.recurse = 2
+		o.am_sender = 1
+		findToken(t, o.ServerOptions(), "-re.iLfxCvIu")
+	})
+
+	// The server side derives client_info from the -e value of the combined
+	// token; verify the gokrazy popt parser extracts it correctly.
+	t.Run("server_parses_combined_e", func(t *testing.T) {
+		osenv := rsyncostest.New(t)
+		pc := NewContext(NewOptions(osenv))
+		if err := pc.ParseArguments(osenv, []string{"--server", "-re.iLfxCvIu", "/dst"}); err != nil {
+			t.Fatalf("ParseArguments: %v", err)
+		}
+		if got, want := pc.Options.ShellCommand(), ".iLfxCvIu"; got != want {
+			t.Fatalf("ShellCommand = %q, want %q", got, want)
+		}
+	})
+}

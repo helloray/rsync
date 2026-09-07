@@ -25,6 +25,7 @@ import (
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/log"
 	"github.com/gokrazy/rsync/internal/progress"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/receiver"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncos"
@@ -527,12 +528,33 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 		opts.SetProtocolVersion(int(min(remoteProtocol, int32(rsync.ProtocolVersion))))
 	}
 
-	if err := c.WriteInt32(sessionChecksumSeed); err != nil {
+	version := opts.ProtocolVersion()
+
+	// client_info is the "-e" value from our parsed args (the ".LfxCvIu"
+	// capability flags a modern client appends after "e" in its server
+	// argstring). At protocol < 30 it is empty and unused.
+	clientInfo := opts.ShellCommand()
+
+	// The checksum seed is part of the binary handshake; for protocol >= 30 it
+	// is preceded by the compatibility-flags varint and the capability vstring
+	// exchange. All handshake bytes travel on the raw stream, before any
+	// multiplexing is engaged (rsync/compat.c:setup_protocol).
+	sess, err := protocol.ServerHandshake(c, protocol.HandshakeParams{
+		Version:         version,
+		ClientInfo:      clientInfo,
+		AllowIncRecurse: opts.AllowIncRecurse() && strings.ContainsRune(clientInfo, 'i'),
+	}, uint32(sessionChecksumSeed))
+	if err != nil {
+		s.logger.Printf("handshake failed (protocol %d): %v", version, err)
 		return err
 	}
+	if opts.DebugGTE(rsyncopts.DEBUG_PROTO, 1) {
+		s.logger.Printf("negotiated protocol %d, checksum %q, compat=%#x",
+			sess.Version, sess.ChecksumAlgo, sess.Compat.Bits())
+	}
 
-	// Switch to multiplexing protocol, but only for server-side transmissions.
-	// Transmissions received from the client are not multiplexed.
+	// Switch to multiplexing protocol for server-side transmissions. The
+	// server-to-client direction is multiplexed at every protocol version >= 23.
 	mpx := &rsyncwire.MultiplexWriter{Writer: c.Writer}
 	// Update cwr to track the multiplexed writer,
 	// but copy the number of bytes written.
@@ -541,6 +563,28 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 		BytesWritten: cwr.BytesWritten,
 	}
 	c.Writer = cwr
+
+	// At protocol >= 30 the client also multiplexes its writes to us, so wrap
+	// our read side in a MultiplexReader to demux them
+	// (rsync/io.c:io_setup_multiplexing).
+	if version >= 30 {
+		mrd := &rsyncwire.MultiplexReader{
+			Env:    &rsyncos.Env{Stderr: s.stderr},
+			Reader: rd,
+		}
+		rrd := bufio.NewReaderSize(mrd, 256*1024)
+		crd = &rsyncwire.CountingReader{
+			R: struct {
+				io.Reader
+				io.Closer
+			}{
+				Reader: rrd,
+				Closer: conn.closer,
+			},
+			BytesRead: crd.BytesRead,
+		}
+		c.Reader = crd
+	}
 
 	if opts.Sender() {
 		// If returning an error, send the error to the client for display, too:

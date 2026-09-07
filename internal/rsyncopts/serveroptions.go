@@ -4,6 +4,28 @@ func (o *Options) CommandOptions(path string, paths ...string) []string {
 	return append(o.ServerOptions(), append([]string{".", path}, paths...)...)
 }
 
+// AllowIncRecurse reports whether this side may use incremental recursion,
+// mirroring rsync/options.c:set_allow_inc_recurse: off without -r, and for a
+// receiving side also off when an explicit non-incremental deletion strategy
+// was requested. (The server additionally requires the client_info to carry
+// 'i'; callers add that condition.)
+func (o *Options) AllowIncRecurse() bool {
+	return o.allowIncRecurse()
+}
+
+// allowIncRecurse mirrors rsync/options.c:set_allow_inc_recurse (client side):
+// incremental recursion is off without -r, and for a receiving client it is
+// also off when an explicit non-incremental deletion strategy was requested.
+func (o *Options) allowIncRecurse() bool {
+	if !o.Recurse() || o.use_qsort != 0 {
+		return false
+	}
+	if !o.Sender() && (o.delete_before != 0 || o.delete_after != 0 || o.delay_updates != 0 || o.prune_empty_dirs != 0) {
+		return false
+	}
+	return true
+}
+
 // rsync/options.c:server_options
 func (o *Options) ServerOptions() []string {
 	var sargv []string
@@ -97,6 +119,19 @@ func (o *Options) ServerOptions() []string {
 	// 	argstr[x++] = 'r';
 
 	// argstr[x] = 0;
+
+	// rsync/options.c:maybe_add_e_option — at protocol >= 30, append the -e
+	// client_info flags so the server can infer our capabilities (compat
+	// flags) and allow incremental recursion. The leading "." (or a
+	// release-string after <SUBPROTOCOL_VERSION>) separates 'e' from the flag
+	// letters; gokrazy has no iconv support, so 's' is intentionally omitted.
+	if o.ProtocolVersion() >= 30 {
+		argstr += "e."
+		if o.allowIncRecurse() {
+			argstr += "i"
+		}
+		argstr += "LfxCvIu"
+	}
 
 	if argstr != "-" {
 		sargv = append(sargv, argstr)

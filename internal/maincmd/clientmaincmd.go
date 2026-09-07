@@ -14,6 +14,7 @@ import (
 
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/progress"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/receiver"
 	"github.com/gokrazy/rsync/internal/restrict"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -288,9 +289,28 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 		opts.SetProtocolVersion(int(min(remoteProtocol, int32(rsync.ProtocolVersion))))
 	}
 
-	seed, err := c.ReadInt32()
+	// Run the binary handshake (version spot-check aside). For protocol >= 30
+	// this reads the server's compatibility-flags varint and the capability
+	// vstrings before the checksum seed; at < 30 it reads just the seed. All
+	// handshake bytes travel on the raw stream.
+	sess, err := protocol.ClientHandshake(c, protocol.HandshakeParams{
+		Version: opts.ProtocolVersion(),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("reading seed: %v", err)
+		return nil, err
+	}
+	seed := int32(sess.ChecksumSeed)
+
+	// At protocol >= 30 the client multiplexes its writes to the server too
+	// (rsync/io.c:io_setup_multiplexing); the writer wrap must happen after the
+	// raw-stream handshake above.
+	if opts.ProtocolVersion() >= 30 {
+		mpx := &rsyncwire.MultiplexWriter{Writer: c.Writer}
+		cwr = &rsyncwire.CountingWriter{
+			W:            mpx,
+			BytesWritten: cwr.BytesWritten,
+		}
+		c.Writer = cwr
 	}
 
 	mrd := &rsyncwire.MultiplexReader{
