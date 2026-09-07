@@ -667,6 +667,13 @@ func TestInteropRemoteCommand(t *testing.T) {
 		sourcesArgs = append(sourcesArgs, ":"+source+"/cheap") // copy cheap directory
 	}
 
+	// os.Args[0] might be relative depending on how go test is called,
+	// so use os.Executable() which returns an absolute path.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// sync into dest dir
 	rsync := exec.Command(rsynctest.AnyRsync(t),
 		append(
@@ -675,7 +682,7 @@ func TestInteropRemoteCommand(t *testing.T) {
 				"--archive",
 				"--protocol=27",
 				"-v", "-v", "-v", "-v",
-				"-e", `"` + os.Args[0] + `"`,
+				"-e", `"` + exe + `"`,
 			}, sourcesArgs...),
 			filepath.Base(dest))...)
 	rsync.Dir = filepath.Dir(dest)
@@ -736,6 +743,13 @@ func TestInteropRemoteDaemon(t *testing.T) {
 		}
 	}
 
+	// os.Args[0] might be relative depending on how go test is called,
+	// so use os.Executable() which returns an absolute path.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// sync into dest dir
 	rsync := exec.Command(rsyncBin,
 		append(
@@ -743,7 +757,7 @@ func TestInteropRemoteDaemon(t *testing.T) {
 				//		"--debug=all4",
 				"--archive",
 				"-v", "-v", "-v", "-v",
-				"-e", `"` + os.Args[0] + `"`,
+				"-e", `"` + exe + `"`,
 			}, sourcesArgs(t)...),
 			filepath.Base(dest))...)
 	rsync.Dir = filepath.Dir(dest)
