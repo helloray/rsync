@@ -42,6 +42,12 @@ type Params struct {
 	// IncRecurse enables inline uid/gid NAME_FOLLOWS only when set; without
 	// incremental recursion the names travel in the trailing id list.
 	IncRecurse bool
+
+	// ID0Names reports whether the uid/gid id lists additionally carry a
+	// terminator name for id 0 (CF_ID0_NAMES). When set, each trailing list is
+	// followed by the id-0 name, and the sender must emit it or the receiver
+	// blocks reading the name length byte (_c-rsync/uidlist.c:send_one_list).
+	ID0Names bool
 }
 
 // FileEntry is the wire-model of a single file-list entry. It is the shared

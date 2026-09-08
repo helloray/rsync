@@ -39,3 +39,14 @@ func SupportsMultiPhase(protocolVersion int) bool {
 func UsesOldPrefixes(protocolVersion int) bool {
 	return protocolVersion < 29
 }
+
+// SupportsIncrementalRecursion reports whether this build implements
+// incremental recursion (--inc-recursive, the protocol-30+ incremental file
+// list exchange). It is false until Phase E lands, so both sides fall back to
+// the complete file list even when a peer would accept incremental framing.
+// Advertising CF_INC_RECURSE without incremental transfer support would make
+// the peer's receiver skip the trailing id lists that we still write (we send
+// numeric-only lists), desyncing the file list decode.
+func SupportsIncrementalRecursion() bool {
+	return false
+}

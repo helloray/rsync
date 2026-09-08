@@ -130,10 +130,10 @@ func TestIDListRoundtrip(t *testing.T) {
 	for _, version := range []int{27, 30} {
 		names := map[int32]string{1000: "alice", 55: "daemon"}
 		var buf bytes.Buffer
-		if err := WriteIDList(&buf, names, version); err != nil {
+		if err := WriteIDList(&buf, names, version, false); err != nil {
 			t.Fatalf("WriteIDList(%d): %v", version, err)
 		}
-		got, err := ReadIDList(bytes.NewReader(buf.Bytes()), version)
+		got, err := ReadIDList(bytes.NewReader(buf.Bytes()), version, false)
 		if err != nil {
 			t.Fatalf("ReadIDList(%d): %v", version, err)
 		}

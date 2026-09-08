@@ -294,6 +294,41 @@ func (s *Server) authenticate(cwr *rsyncwire.CountingWriter, rd *bufio.Reader, m
 	return nil
 }
 
+// readDaemonArgs reads the argument tokens a client sends after the
+// "@RSYNCD: OK" line. Older clients (and gokr-rsync's own client) separate
+// args with newlines and terminate with a blank line; rsync >= 3.0 clients
+// separate them with NULs (rsync sets rl_nulls=1 for protocol >= 30) and
+// terminate with an empty token. Reading until the first '\n' or '\0' accepts
+// either framing transparently. The arg list ends at the first empty token.
+func readDaemonArgs(rd *bufio.Reader, s *Server) ([]string, error) {
+	var flags []string
+	for {
+		var buf []byte
+		term := byte('\n')
+		for {
+			b, err := rd.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			if b == '\n' || b == 0 {
+				term = b
+				break
+			}
+			buf = append(buf, b)
+		}
+		tok := string(buf)
+		if term == '\n' {
+			tok = strings.TrimSpace(tok)
+		}
+		s.logger.Printf("client sent: %q", tok)
+		if tok == "" {
+			break
+		}
+		flags = append(flags, tok)
+	}
+	return flags, nil
+}
+
 // FIXME: context cancellation not yet implemented
 func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	_ = ctx // not implemented. what would be the best thing to do? wrap conn's reader part with cancelable reader?
@@ -302,8 +337,14 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	cwr := conn.cwr
 	rd := conn.rd
 	// send server greeting
-
-	fmt.Fprintf(cwr, "@RSYNCD: %d\n", rsync.ProtocolVersion)
+	//
+	// rsync >= 3.4 (protocol >= 31.x with a subprotocol) parses the greeting
+	// strictly: it requires a "<major>.<sub>" version plus the checksum
+	// algorithm list, and aborts with "the server omitted the subprotocol
+	// value" if the ".sub" is missing. Advertise the algorithms we can
+	// actually compute (protocol.ChecksumList); the real strong-checksum is
+	// re-negotiated in the binary handshake afterwards.
+	fmt.Fprintf(cwr, "@RSYNCD: %d.0 %s\n", rsync.ProtocolVersion, strings.Join(protocol.ChecksumList, " "))
 
 	// read client greeting
 	clientGreeting, err := rd.ReadString('\n')
@@ -373,18 +414,9 @@ func (s *Server) HandleDaemonConn(ctx context.Context, conn *Conn) (err error) {
 	io.WriteString(cwr, terminationCommand)
 
 	// read requested flags
-	var flags []string
-	for {
-		flag, err := rd.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		flag = strings.TrimSpace(flag)
-		s.logger.Printf("client sent: %q", flag)
-		if flag == "" {
-			break
-		}
-		flags = append(flags, flag)
+	flags, err := readDaemonArgs(rd, s)
+	if err != nil {
+		return err
 	}
 
 	s.logger.Printf("flags: %+v", flags)
@@ -542,7 +574,8 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 	sess, err := protocol.ServerHandshake(c, protocol.HandshakeParams{
 		Version:         version,
 		ClientInfo:      clientInfo,
-		AllowIncRecurse: opts.AllowIncRecurse() && strings.ContainsRune(clientInfo, 'i'),
+		AllowIncRecurse: protocol.SupportsIncrementalRecursion() &&
+			opts.AllowIncRecurse() && strings.ContainsRune(clientInfo, 'i'),
 	}, uint32(sessionChecksumSeed))
 	if err != nil {
 		s.logger.Printf("handshake failed (protocol %d): %v", version, err)

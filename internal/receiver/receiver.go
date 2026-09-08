@@ -229,8 +229,15 @@ func (rt *Transfer) receiveData(f *File, localFile *os.File) error {
 		}
 	}()
 
+	// The whole-file checksum mirrors C's sum_init (checksum.c): at protocol < 30
+	// the negotiated/implicit "md4" is CSUM_MD4_OLD, which folds the checksum
+	// seed (4 bytes) into the digest; at protocol >= 30 the negotiated modern
+	// CSUM_MD4 does NOT. The seed feed must be gated on the protocol version so
+	// the sender, receiver and C counterpart all compute the same digest.
 	h := md4.New()
-	binary.Write(h, binary.LittleEndian, rt.Seed)
+	if rt.ProtocolVersion() < 30 {
+		binary.Write(h, binary.LittleEndian, rt.Seed)
+	}
 
 	wr := io.MultiWriter(w, h)
 

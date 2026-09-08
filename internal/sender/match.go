@@ -48,9 +48,15 @@ func (st *Transfer) hashSearch(targets []target, tagTable map[uint16]int, head r
 		fmt.Fprintln(st.Env.Stdout, fl.path)
 	}
 
-	// sum_init()
+	// sum_init(): mirrors C's checksum.c. At protocol < 30 "md4" is the seeded
+	// CSUM_MD4_OLD, so the checksum seed is folded in; at protocol >= 30 it is
+	// the modern CSUM_MD4 which is computed over the file data only. This must
+	// match the receiver (receiver.go) and the C counterpart exactly, or the
+	// whole-file verification check strands the file.
 	h := md4.New()
-	binary.Write(h, binary.LittleEndian, st.Seed)
+	if st.Opts.ProtocolVersion() < 30 {
+		binary.Write(h, binary.LittleEndian, st.Seed)
+	}
 
 	// The following quotes are citations from
 	// https://www.samba.org/~tridge/phd_thesis.pdf, section 3.2.6 The

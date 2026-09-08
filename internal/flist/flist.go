@@ -22,9 +22,17 @@ func WriteFileList(w io.Writer, p Params, files []*FileEntry, uidNames, gidNames
 			return err
 		}
 	}
-	// end-of-list terminator: a zero flags frame.
+	// end-of-list terminator: a zero flags frame, immediately followed (at
+	// protocol >= 30) by the i/o error word. C recv_file_list consumes
+	// [term varint(0)][io-word varint] before the id lists when
+	// xfer_flags_as_varint (flist.c:2946-2949), but reads the io-word after
+	// the id lists before 30 (flist.c:3067-3071). So the io-word must move in
+	// front of the trailing id lists for protocol >= 30 to match.
 	if p.ProtocolVersion >= 30 && p.VarintFlags {
 		if err := protocol.WriteVarint(w, 0); err != nil {
+			return err
+		}
+		if err := protocol.WriteVarint(w, ioErrors); err != nil {
 			return err
 		}
 	} else if err := writeByte(w, 0); err != nil {
@@ -33,18 +41,20 @@ func WriteFileList(w io.Writer, p Params, files []*FileEntry, uidNames, gidNames
 	// trailing id lists. A codec is used for one direction at a time, so the
 	// Write/Read halves must make the same decision.
 	if p.PreserveUid && atProto30UsesIDList(p) {
-		if err := WriteIDList(w, uidNames, p.ProtocolVersion); err != nil {
+		id0 := p.ID0Names && p.ProtocolVersion >= 30
+		if err := WriteIDList(w, uidNames, p.ProtocolVersion, id0); err != nil {
 			return err
 		}
 	}
 	if p.PreserveGid && atProto30UsesIDList(p) {
-		if err := WriteIDList(w, gidNames, p.ProtocolVersion); err != nil {
+		id0 := p.ID0Names && p.ProtocolVersion >= 30
+		if err := WriteIDList(w, gidNames, p.ProtocolVersion, id0); err != nil {
 			return err
 		}
 	}
-	// i/o error word
-	if p.ProtocolVersion >= 30 && p.VarintFlags {
-		return protocol.WriteVarint(w, ioErrors)
+	// i/o error word (protocol < 30 reads it after the id lists).
+	if p.ProtocolVersion >= 30 {
+		return nil
 	}
 	return writeInt32(w, ioErrors)
 }
@@ -69,9 +79,20 @@ func ReadFileList(r io.Reader, p Params, uidNames, gidNames map[int32]string) ([
 		}
 		files = append(files, f)
 	}
+	// i/o error word: at protocol >= 30 it immediately follows the terminator
+	// (C flist.c:2947-2949), before the id lists; below 30 it comes after them.
+	var ioErrors int32
+	if p.ProtocolVersion >= 30 && p.VarintFlags {
+		v, err := protocol.ReadVarint(r)
+		if err != nil {
+			return nil, 0, err
+		}
+		ioErrors = v
+	}
 	// trailing id lists
 	if p.PreserveUid && atProto30UsesIDList(p) {
-		ids, err := ReadIDList(r, p.ProtocolVersion)
+		id0 := p.ID0Names && p.ProtocolVersion >= 30
+		ids, err := ReadIDList(r, p.ProtocolVersion, id0)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -80,7 +101,8 @@ func ReadFileList(r io.Reader, p Params, uidNames, gidNames map[int32]string) ([
 		}
 	}
 	if p.PreserveGid && atProto30UsesIDList(p) {
-		ids, err := ReadIDList(r, p.ProtocolVersion)
+		id0 := p.ID0Names && p.ProtocolVersion >= 30
+		ids, err := ReadIDList(r, p.ProtocolVersion, id0)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -88,15 +110,7 @@ func ReadFileList(r io.Reader, p Params, uidNames, gidNames map[int32]string) ([
 			gidNames[k] = v
 		}
 	}
-	// i/o error word
-	var ioErrors int32
-	if p.ProtocolVersion >= 30 && p.VarintFlags {
-		v, err := protocol.ReadVarint(r)
-		if err != nil {
-			return nil, 0, err
-		}
-		ioErrors = v
-	} else {
+	if p.ProtocolVersion < 30 {
 		v, err := readInt32(r)
 		if err != nil {
 			return nil, 0, err

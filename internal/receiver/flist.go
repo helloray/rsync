@@ -149,6 +149,7 @@ func (rt *Transfer) flistParams() flist.Params {
 	if rt.Session != nil {
 		p.VarintFlags = rt.Session.VarintFlistFlags
 		p.IncRecurse = rt.Session.IncRecurse
+		p.ID0Names = rt.Session.ID0Names
 	}
 	return p
 }

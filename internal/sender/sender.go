@@ -304,7 +304,11 @@ func (st *Transfer) sendFile(fileIndex int32, fl file) error {
 	}
 
 	h := md4.New()
-	binary.Write(h, binary.LittleEndian, st.Seed)
+	// Mirror C's sum_init seed gating (see match.go): protocol < 30 folds the
+	// checksum seed, >= 30 does not. Must match the receiver and C counterpart.
+	if st.Opts.ProtocolVersion() < 30 {
+		binary.Write(h, binary.LittleEndian, st.Seed)
+	}
 
 	// Calculate the md4 hash in a goroutine.
 	//
@@ -363,6 +367,9 @@ func (st *Transfer) sendFile(fileIndex int32, fl file) error {
 	if err := eg.Wait(); err != nil {
 		return err
 	}
+	// The whole-file checksum used for cross-checking is computed over the file
+	// data only (C's sum_init for modern CSUM_MD4, checksum.c, does not feed the
+	// checksum seed), so the seed must not be folded into this hash.
 	sum := h.Sum(nil)
 	// st.logger.Printf("sum: %x (len = %d)", sum, len(sum))
 	if _, err := st.Conn.Writer.Write(sum); err != nil {

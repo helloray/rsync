@@ -1,6 +1,7 @@
 package sender
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 
@@ -16,30 +17,35 @@ func (st *Transfer) handleStats(crd *rsyncwire.CountingReader, cwr *rsyncwire.Co
 		return nil
 	}
 
-	// send statistics:
+	// send statistics as varlong30 values, coalesced into a single multiplex
+	// DATA frame, exactly like _c-rsync/main.c:handle_stats does when
+	// am_server && am_sender (write_varlong30 for each, one buffered flush).
+	// The peer receiver reads them back as varlong30 (main.c:371-377); any
+	// other encoding (fixed-width ints, per-value frames) desyncs its reader.
+	var buf bytes.Buffer
+	var syserr error
+	write := func(v int64) {
+		if syserr == nil {
+			syserr = protocol.WriteVLong30(&buf, v, 3)
+		}
+	}
 	// total bytes read (from network connection)
-	if err := st.Conn.WriteInt64(crd.BytesRead); err != nil {
-		return err
-	}
+	write(crd.BytesRead)
 	// total bytes written (to network connection)
-	if err := st.Conn.WriteInt64(cwr.BytesWritten); err != nil {
-		return err
-	}
+	write(cwr.BytesWritten)
 	// total size of files
-	if err := st.Conn.WriteInt64(fileList.TotalSize); err != nil {
-		return err
-	}
+	write(fileList.TotalSize)
 	// rsync/main.c:handle_stats: with protocol >= 29, the file list build
 	// and transfer times follow the three byte counters.
 	if protocol.SupportsMultiPhase(st.Opts.ProtocolVersion()) {
-		if err := st.Conn.WriteInt64(0); err != nil { // flist build time
-			return err
-		}
-		if err := st.Conn.WriteInt64(0); err != nil { // flist transfer time
-			return err
-		}
+		write(0) // flist build time
+		write(0) // flist transfer time
 	}
-	return nil
+	if syserr != nil {
+		return syserr
+	}
+	_, err := st.Conn.Writer.Write(buf.Bytes())
+	return err
 }
 
 // rsync/main.c:client_run am_sender
@@ -88,11 +94,15 @@ func (st *Transfer) Do(crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWri
 		st.Logger.Printf("reading final int32")
 	}
 
-	finish, err := st.Conn.ReadInt32()
+	// The receiver signals the end of the transfer with a final NDX_DONE.
+	// At protocol >= 30 this is a single-byte byte-reduction marker (0x00),
+	// at lower versions a plain int32 -1, so it must be read through the ndx
+	// codec rather than as a fixed-width int (rsync/main.c:client_run).
+	finish, err := st.ndxRead().ReadNdx(st.Conn)
 	if err != nil {
 		return nil, err
 	}
-	if finish != -1 {
+	if finish != protocol.NdxDone {
 		return nil, fmt.Errorf("protocol error: expected final -1, got %d", finish)
 	}
 

@@ -75,9 +75,11 @@ const (
 //
 // History: this implementation originally spoke protocol 27 (rsync 2.6.0,
 // released 2004). Protocol 29 (rsync 2.6.7) is the oldest version that
-// tridge rsync 3.x still accepts, so upgrading to 29 makes interoperability
-// testing against C rsync 3.x possible.
-const ProtocolVersion = 29
+// tridge rsync 3.x still accepts. Protocol 30 (rsync 3.1.0) adds the varint
+// flist/flags framing, the byte-reduction NDX channel and bidirectional
+// multiplexing; the fork speaks it in complete-file-list mode (incremental
+// recursion is not yet implemented, so CF_INC_RECURSE is never advertised).
+const ProtocolVersion = 30
 
 // ProtocolVersionMin is the oldest protocol version we are willing to
 // speak, matching rsync’s MIN_PROTOCOL_VERSION.
