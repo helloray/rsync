@@ -63,6 +63,13 @@ type codec struct {
 func (c *codec) Encode(w io.Writer, f *FileEntry) error {
 	var xflags uint32
 
+	// rsync/flist.c:send_file_entry: below protocol 30 the FLAG_TOP_DIR mark
+	// rides XMIT_TOP_DIR (same bit value) — the pre-29 receiver maps it back
+	// to FLAG_TOP_DIR and uses it to drive the per-top-dir delete pass.
+	if c.params.ProtocolVersion < 30 && f.isDir() && f.TopDir {
+		xflags |= rsync.XMIT_TOP_DIR
+	}
+
 	if f.Mode == c.lastMode {
 		xflags |= rsync.XMIT_SAME_MODE
 	}
@@ -170,15 +177,18 @@ func (c *codec) Encode(w io.Writer, f *FileEntry) error {
 			}
 		}
 	default:
-		x8 := byte(xflags)
-		if x8 == 0 {
+		// A zero flags byte terminates the list, so a zero-flag entry needs a
+		// filler: dirs use XMIT_LONG_NAME, non-dirs XMIT_TOP_DIR. The filler
+		// must land in xflags (not just the written byte) so the LONG_NAME
+		// name-length framing below stays in sync with what the peer reads.
+		if xflags == 0 {
 			if f.isDir() {
-				x8 = rsync.XMIT_LONG_NAME
+				xflags = rsync.XMIT_LONG_NAME
 			} else {
-				x8 = rsync.XMIT_TOP_DIR
+				xflags = rsync.XMIT_TOP_DIR
 			}
 		}
-		if err := writeByte(w, x8); err != nil {
+		if err := writeByte(w, byte(xflags)); err != nil {
 			return err
 		}
 	}
@@ -196,8 +206,13 @@ func (c *codec) Encode(w io.Writer, f *FileEntry) error {
 		return err
 	}
 
-	// 5. file length (varlong30, min 3 bytes).
-	if err := protocol.WriteVLong30(w, f.Length, 3); err != nil {
+	// 5. file length: write_varlong30 — a varlong at protocol >= 30, the
+	// fixed-width longint below 30 (rsync/io.h:write_varlong30).
+	if c.params.ProtocolVersion >= 30 {
+		if err := protocol.WriteVLong30(w, f.Length, 3); err != nil {
+			return err
+		}
+	} else if err := protocol.WriteLongInt(w, f.Length); err != nil {
 		return err
 	}
 
@@ -396,7 +411,14 @@ func (c *codec) decode(r io.Reader, xflags uint32) (*FileEntry, error) {
 	}
 	f.Name = string(buf)
 
-	length, err := protocol.ReadVLong30(r, 3)
+	// 5. file length: read_varlong30 — see Encode.
+	var length int64
+	var err error
+	if c.params.ProtocolVersion >= 30 {
+		length, err = protocol.ReadVLong30(r, 3)
+	} else {
+		length, err = protocol.ReadLongInt(r)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -585,6 +607,13 @@ func (c *codec) decode(r io.Reader, xflags uint32) (*FileEntry, error) {
 		if _, err := io.ReadFull(r, f.Checksum[:]); err != nil {
 			return nil, err
 		}
+	}
+
+	// rsync/flist.c:recv_file_entry: below protocol 30, XMIT_TOP_DIR maps
+	// back to FLAG_TOP_DIR on the decoded entry (see Encode). Non-dirs can
+	// carry the bit as a zero-flags filler; C's generator ignores it there.
+	if c.params.ProtocolVersion < 30 && f.isDir() && xflags&rsync.XMIT_TOP_DIR != 0 {
+		f.TopDir = true
 	}
 
 	c.lastMode = f.Mode

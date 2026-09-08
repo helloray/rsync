@@ -79,6 +79,21 @@ type Transfer struct {
 	Users           map[int32]mapping
 	Groups          map[int32]mapping
 	retouchDirPerms bool
+
+	// delStats counts what deleteFiles removed, reported to the sender as
+	// NDX_DEL_STATS at protocol >= 31 (rsync/main.c:write_del_stats).
+	delStats delStats
+}
+
+// delStats mirrors rsync's stats.deleted_* counters as mutually exclusive
+// buckets (rsync tracks a running total plus per-kind counters; the Go
+// walk classifies each removed entry into exactly one bucket).
+type delStats struct {
+	files    int32
+	dirs     int32
+	symlinks int32
+	devices  int32
+	specials int32
 }
 
 func (rt *Transfer) listOnly() bool { return rt.Dest == "" }

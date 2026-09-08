@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync"
+	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/restrict"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncos"
@@ -83,8 +84,12 @@ func StartInbandExchange(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.Re
 
 	rd := bufio.NewReader(conn)
 
-	// send client greeting
-	fmt.Fprintf(conn, "@RSYNCD: %d\n", rsync.ProtocolVersion)
+	// send client greeting — rsync/compat.c:output_daemon_greeting: both
+	// sides send "version.sub checksum-list". Servers speaking protocol >= 30
+	// reject a client greeting that omits the subprotocol value
+	// (rsync/clientserver.c:220-222), and servers above protocol 31 likewise
+	// require the digest name list.
+	fmt.Fprintf(conn, "@RSYNCD: %d.0 %s\n", rsync.ProtocolVersion, strings.Join(protocol.ChecksumList, " "))
 
 	// read server greeting
 	serverGreeting, err := rd.ReadString('\n')
@@ -157,10 +162,27 @@ func StartInbandExchange(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.Re
 	if opts.Verbose() {
 		osenv.Logf("sending daemon args: %s", sargv)
 	}
-	for _, argv := range sargv {
-		fmt.Fprintf(conn, "%s\n", argv)
+	if opts.ProtocolVersion() >= 30 {
+		// rsync/clientserver.c:exchange_protocols sets rl_nulls = 1 once the
+		// negotiated protocol is >= 30: the daemon then reads the argument
+		// list NUL-separated and terminated by an empty token
+		// (rsync/clientserver.c:439-445), so newlines would leave it waiting
+		// for more args forever.
+		var buf []byte
+		for _, arg := range sargv {
+			buf = append(buf, arg...)
+			buf = append(buf, 0)
+		}
+		buf = append(buf, 0)
+		if _, err := conn.Write(buf); err != nil {
+			return false, err
+		}
+	} else {
+		for _, argv := range sargv {
+			fmt.Fprintf(conn, "%s\n", argv)
+		}
+		fmt.Fprintf(conn, "\n")
 	}
-	fmt.Fprintf(conn, "\n")
 
 	return false, nil
 }

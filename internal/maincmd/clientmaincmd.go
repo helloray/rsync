@@ -348,6 +348,21 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 			osenv.Logf("sender(paths=%q)", paths)
 		}
 
+		// rsync/main.c:client_run + exclude.c:send_filter_list: the sender
+		// transmits its filter rules before the file list when the receiving
+		// side will read them (delete mode at protocol >= 29, or
+		// --prune-empty-dirs); otherwise the receiver skips its rule reader
+		// and nothing needs to be sent.
+		receiverWantsList := opts.PruneEmptyDirs() ||
+			(opts.DeleteMode() && (!opts.DeleteExcluded() || opts.ProtocolVersion() >= 29))
+		if receiverWantsList {
+			for _, rule := range opts.FilterRules() {
+				c.WriteInt32(int32(len(rule)))
+				c.WriteString(rule)
+			}
+			c.WriteInt32(0)
+		}
+
 		// Turn relative paths like ./gcexportdata or bin/gcexportdata
 		// into absolute paths so that we can call Transfer.Do()
 		// with modPath="/" below.

@@ -115,6 +115,17 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			continue
 		}
 
+		// rsync/generator.c:write_del_stats: at protocol >= 31 the generator
+		// reports its delete counters as an NDX_DEL_STATS frame followed by
+		// five varints (files, dirs, symlinks, devices, specials). The values
+		// are informational; drain them and keep reading.
+		if fileIndex == protocol.NdxDelStats {
+			if err := st.drainDelStats(); err != nil {
+				return err
+			}
+			continue
+		}
+
 		// rsync/rsync.c:read_ndx_and_attrs: with protocol >= 29, the file
 		// index is followed by the itemize iflags shortint, optionally the
 		// basis type byte and the xname vstring.
@@ -235,6 +246,17 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 }
 
 // rsync/sender.c:receive_sums()
+// drainDelStats consumes the five varints (files, dirs, symlinks, devices,
+// specials) that follow an NDX_DEL_STATS frame (rsync/main.c:read_del_stats).
+func (st *Transfer) drainDelStats() error {
+	for i := 0; i < 5; i++ {
+		if _, err := protocol.ReadVarint(st.Conn); err != nil {
+			return fmt.Errorf("reading delete stats: %v", err)
+		}
+	}
+	return nil
+}
+
 func (st *Transfer) receiveSums() (rsync.SumHead, error) {
 	var head rsync.SumHead
 	if err := head.ReadFrom(st.Conn); err != nil {

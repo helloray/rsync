@@ -67,6 +67,7 @@ type FileEntry struct {
 	RdevMinor  int32
 	LinkTarget string
 	Checksum   [16]byte
+	TopDir     bool // this entry is a transfer-top directory (FLAG_TOP_DIR)
 }
 
 // IS_* helpers mirror the S_IS* macros; FileEntry.Mode carries the Linux st_mode

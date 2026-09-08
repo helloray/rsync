@@ -42,6 +42,14 @@ func (rt *Transfer) GenerateFiles(fileList []*File) error {
 		return err
 	}
 
+	// rsync/generator.c:2873-2877: at protocol >= 31 the generator reports its
+	// delete counters between the second and third phase-done markers.
+	if protocol.SupportsDeleteStats(rt.ProtocolVersion()) && rt.Opts.DeleteMode {
+		if err := rt.writeDelStats(); err != nil {
+			return err
+		}
+	}
+
 	// rsync/generator.c:2882-2890: with protocol >= 29, the generator
 	// closes a third (delay-updates) phase.
 	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {

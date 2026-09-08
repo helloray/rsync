@@ -724,8 +724,16 @@ func (o *Options) PreserveHardLinks() bool    { return o.preserve_hard_links != 
 func (o *Options) DoFsync() bool              { return o.do_fsync != 0 }
 func (o *Options) Recurse() bool              { return o.recurse != 0 }
 func (o *Options) Verbose() bool              { return o.verbose != 0 }
-func (o *Options) DeleteMode() bool           { return o.delete_mode != 0 }
+func (o *Options) DeleteMode() bool {
+	// rsync/options.c: --delete sets delete_mode directly, while
+	// --delete-before/-delay/-after set their own flag; all four imply that
+	// the receiver runs a delete pass (and reports NDX_DEL_STATS at >= 31).
+	return o.delete_mode != 0 || o.delete_during != 0 ||
+		o.delete_before != 0 || o.delete_after != 0
+}
 func (o *Options) Sender() bool               { return o.am_sender != 0 }
+func (o *Options) PruneEmptyDirs() bool       { return o.prune_empty_dirs != 0 }
+func (o *Options) DeleteExcluded() bool       { return o.delete_excluded != 0 }
 func (o *Options) SetSender()                 { o.am_sender = 1 }
 func (o *Options) LocalServer() bool          { return o.local_server != 0 }
 func (o *Options) SetLocalServer()            { o.local_server = 1 }
@@ -910,10 +918,10 @@ func (o *Options) gokrazyTable() []poptOption {
 		//{"no-append", "", POPT_ARG_VAL, &o.append_mode, 0},
 		//{"del", "", POPT_ARG_NONE, &o.delete_during, 0},
 		{"delete", "", POPT_ARG_NONE, &o.delete_mode, 0},
-		//{"delete-before", "", POPT_ARG_NONE, &o.delete_before, 0},
-		//{"delete-during", "", POPT_ARG_VAL, &o.delete_during, 1},
-		//{"delete-delay", "", POPT_ARG_VAL, &o.delete_during, 2},
-		//{"delete-after", "", POPT_ARG_NONE, &o.delete_after, 0},
+		{"delete-before", "", POPT_ARG_NONE, &o.delete_before, 0},
+		{"delete-during", "", POPT_ARG_VAL, &o.delete_during, 1},
+		{"delete-delay", "", POPT_ARG_VAL, &o.delete_during, 2},
+		{"delete-after", "", POPT_ARG_NONE, &o.delete_after, 0},
 		//{"delete-excluded", "", POPT_ARG_NONE, &o.delete_excluded, 0},
 		//{"delete-missing-args", "", POPT_BIT_SET, &o.missing_args, 2},
 		//{"ignore-missing-args", "", POPT_BIT_SET, &o.missing_args, 1},

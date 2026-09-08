@@ -40,6 +40,23 @@ func UsesOldPrefixes(protocolVersion int) bool {
 	return protocolVersion < 29
 }
 
+// SupportsDeleteStats reports whether the receiver's generator reports its
+// delete counters as an NDX_DEL_STATS frame (five varints) placed between
+// the second and third phase-done markers (rsync/generator.c:2873,
+// protocol >= 31). The sender side must drain the frame when it appears.
+func SupportsDeleteStats(protocolVersion int) bool {
+	return protocolVersion >= 31
+}
+
+// SupportsExtendedGoodbye reports whether the end-of-transfer goodbye is
+// extended to a two-round exchange (rsync/main.c:read_final_goodbye,
+// protocol >= 31): the sender reads the first final NDX_DONE, echoes one
+// back, and then reads the second final NDX_DONE. Below protocol 31 the
+// goodbye is a single NDX_DONE with no echo.
+func SupportsExtendedGoodbye(protocolVersion int) bool {
+	return protocolVersion >= 31
+}
+
 // SupportsIncrementalRecursion reports whether this build implements
 // incremental recursion (--inc-recursive, the protocol-30+ incremental file
 // list exchange). It is false until Phase E lands, so both sides fall back to

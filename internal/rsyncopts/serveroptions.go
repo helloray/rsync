@@ -1,5 +1,7 @@
 package rsyncopts
 
+import "github.com/gokrazy/rsync/internal/protocol"
+
 func (o *Options) CommandOptions(path string, paths ...string) []string {
 	return append(o.ServerOptions(), append([]string{".", path}, paths...)...)
 }
@@ -125,9 +127,12 @@ func (o *Options) ServerOptions() []string {
 	// flags) and allow incremental recursion. The leading "." (or a
 	// release-string after <SUBPROTOCOL_VERSION>) separates 'e' from the flag
 	// letters; gokrazy has no iconv support, so 's' is intentionally omitted.
+	// 'i' must only be advertised when incremental recursion is actually
+	// implemented: a server that receives it runs inc-recurse framing
+	// (NDX_FLIST_EOF, per-directory chunks) which we cannot produce.
 	if o.ProtocolVersion() >= 30 {
 		argstr += "e."
-		if o.allowIncRecurse() {
+		if o.allowIncRecurse() && protocol.SupportsIncrementalRecursion() {
 			argstr += "i"
 		}
 		argstr += "LfxCvIu"
@@ -189,6 +194,27 @@ func (o *Options) ServerOptions() []string {
 	// 	args[ac++] = "--delete-excluded";
 	// else if (delete_mode)
 	// 	args[ac++] = "--delete";
+
+	// rsync/options.c:server_options (am_sender block): pass the deletion
+	// strategy to the server — without it the receiving side never runs a
+	// delete pass, no matter what the client requested.
+	if o.Sender() {
+		switch {
+		case o.delete_before != 0:
+			sargv = append(sargv, "--delete-before")
+		case o.delete_during == 2:
+			sargv = append(sargv, "--delete-delay")
+		case o.delete_during != 0:
+			sargv = append(sargv, "--delete-during")
+		case o.delete_after != 0:
+			sargv = append(sargv, "--delete-after")
+		case o.DeleteMode() && o.delete_excluded == 0:
+			sargv = append(sargv, "--delete")
+		}
+		if o.delete_excluded != 0 {
+			sargv = append(sargv, "--delete-excluded")
+		}
+	}
 
 	// if (size_only)
 	// 	args[ac++] = "--size-only";

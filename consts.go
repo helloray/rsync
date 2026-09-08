@@ -77,9 +77,13 @@ const (
 // released 2004). Protocol 29 (rsync 2.6.7) is the oldest version that
 // tridge rsync 3.x still accepts. Protocol 30 (rsync 3.1.0) adds the varint
 // flist/flags framing, the byte-reduction NDX channel and bidirectional
-// multiplexing; the fork speaks it in complete-file-list mode (incremental
-// recursion is not yet implemented, so CF_INC_RECURSE is never advertised).
-const ProtocolVersion = 30
+// multiplexing. Protocol 31 (rsync 3.1.1) makes the safe file list framing
+// mandatory and adds the NDX_DEL_STATS delete report; protocol 32 (rsync
+// 3.1.2) has no further structural wire changes beyond the optional
+// IO_TIMEOUT negotiation. The fork speaks them in complete-file-list mode
+// (incremental recursion is not yet implemented, so CF_INC_RECURSE is never
+// advertised).
+const ProtocolVersion = 32
 
 // ProtocolVersionMin is the oldest protocol version we are willing to
 // speak, matching rsync’s MIN_PROTOCOL_VERSION.

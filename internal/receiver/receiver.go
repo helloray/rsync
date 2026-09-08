@@ -40,6 +40,18 @@ func (rt *Transfer) RecvFiles(fileList []*File) error {
 			}
 			continue
 		}
+		// rsync/main.c:read_del_stats: at protocol >= 31 the generator
+		// reports its delete counters as an NDX_DEL_STATS frame followed by
+		// five varints (files, dirs, symlinks, devices, specials). The values
+		// are informational; drain them and keep reading.
+		if idx == protocol.NdxDelStats {
+			for i := 0; i < 5; i++ {
+				if _, err := protocol.ReadVarint(rt.Conn); err != nil {
+					return fmt.Errorf("reading delete stats: %v", err)
+				}
+			}
+			continue
+		}
 		if idx < 0 {
 			return fmt.Errorf("invalid file index %d (list has %d entries)", idx, len(fileList))
 		}

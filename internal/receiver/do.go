@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"sync"
@@ -54,13 +55,64 @@ func (rt *Transfer) deleteFiles(fileList []*File) error {
 			if err := rt.DestRoot.RemoveAll(path); err != nil {
 				rt.Logger.Printf("  deleting %s failed: %v", path, err)
 				// keep going
+			} else {
+				rt.countDeletion(info)
+				// Only skip the remainder when a directory was removed;
+				// for a regular file, fs.SkipDir would abandon the rest
+				// of this directory's scan (deletions after it would be
+				// silently missed).
+				if info.IsDir() {
+					return fs.SkipDir
+				}
 			}
-			return fs.SkipDir // skip the just-deleted directory
+			return nil
 		})
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil // destination does not exist, nothing to do
 			}
+			return err
+		}
+	}
+	return nil
+}
+
+// countDeletion classifies one removed entry for the NDX_DEL_STATS counters.
+// RemoveAll() takes whole subtrees at once, so nested contents are not
+// counted individually — the counters are informational (they feed the
+// --stats summary), and the wire format does not depend on exact values.
+func (rt *Transfer) countDeletion(info fs.DirEntry) {
+	if info.IsDir() {
+		rt.delStats.dirs++
+		return
+	}
+	if info.Type()&fs.ModeSymlink != 0 {
+		rt.delStats.symlinks++
+		return
+	}
+	if info.Type()&(fs.ModeDevice|fs.ModeCharDevice) != 0 {
+		rt.delStats.devices++
+		return
+	}
+	if info.Type()&(fs.ModeNamedPipe|fs.ModeSocket) != 0 {
+		rt.delStats.specials++
+		return
+	}
+	rt.delStats.files++
+}
+
+// rsync/main.c:write_del_stats: report the delete counters as an
+// NDX_DEL_STATS frame (protocol >= 31). C tracks deleted_files as the total
+// and sends files = total - dirs - symlinks - devices - specials; the Go
+// counters are already mutually exclusive buckets, so the regular-file count
+// is just the remaining bucket.
+func (rt *Transfer) writeDelStats() error {
+	if err := rt.writeNdx(protocol.NdxDelStats, 0); err != nil {
+		return err
+	}
+	s := &rt.delStats
+	for _, v := range []int32{s.files, s.dirs, s.symlinks, s.devices, s.specials} {
+		if err := protocol.WriteVarint(rt.Conn, v); err != nil {
 			return err
 		}
 	}
@@ -113,6 +165,27 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
 		return nil, err
 	}
+	// rsync/main.c:read_final_goodbye: at protocol >= 31 the goodbye is a
+	// two-round exchange. The sender (main.c:1007) and the receiver process
+	// (main.c:1118) both call it: the sender reads the receiver's first
+	// goodbye, echoes one back, and reads the second; the receiver reads that
+	// echo before sending the second goodbye (the receiver process at
+	// main.c:1108 and the generator at main.c:1166 each contribute one). The
+	// read is load-bearing for Go↔Go transfers: the transport pipe is
+	// unbuffered, so writing both goodbyes back-to-back deadlocks against the
+	// sender's echo write.
+	if protocol.SupportsExtendedGoodbye(rt.ProtocolVersion()) {
+		finish, err := rt.ndxRead().ReadNdx(rt.Conn)
+		if err != nil {
+			return nil, err
+		}
+		if finish != protocol.NdxDone {
+			return nil, fmt.Errorf("protocol error: expected goodbye echo, got %d", finish)
+		}
+		if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
+			return nil, err
+		}
+	}
 
 	return stats, nil
 }
@@ -122,28 +195,39 @@ func (rt *Transfer) report(c *rsyncwire.Conn) (*rsyncstats.TransferStats, error)
 	// Read the first two in opposite order (compared to the sender’s
 	// handle_stats) because the meaning of read/write swaps when switching
 	// from sender to receiver (rsync/main.c:handle_stats).
+	//
+	// The sender encodes each value with write_varlong30 (rsync/main.c:353),
+	// which is a varint at protocol >= 30 and falls back to the fixed-width
+	// longint below 30 (rsync/io.c:read_varlong30) — the reader must mirror
+	// that split or the byte stream desyncs and both sides deadlock.
+	readStat := func() (int64, error) {
+		if rt.ProtocolVersion() >= 30 {
+			return protocol.ReadVLong30(c, 3)
+		}
+		return protocol.ReadLongInt(c)
+	}
 	// total bytes written (to network connection)
-	written, err := c.ReadInt64()
+	written, err := readStat()
 	if err != nil {
 		return nil, err
 	}
 	// total bytes read (from network connection)
-	read, err := c.ReadInt64()
+	read, err := readStat()
 	if err != nil {
 		return nil, err
 	}
 	// total size of files
-	size, err := c.ReadInt64()
+	size, err := readStat()
 	if err != nil {
 		return nil, err
 	}
 	// rsync/main.c:handle_stats: with protocol >= 29, the file list build
 	// and transfer times follow the three byte counters.
 	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {
-		if _, err := c.ReadInt64(); err != nil { // flist build time
+		if _, err := readStat(); err != nil { // flist build time
 			return nil, err
 		}
-		if _, err := c.ReadInt64(); err != nil { // flist transfer time
+		if _, err := readStat(); err != nil { // flist transfer time
 			return nil, err
 		}
 	}

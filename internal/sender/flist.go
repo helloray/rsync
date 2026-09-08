@@ -450,6 +450,7 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 			RdevMajor:  f.RdevMajor,
 			RdevMinor:  f.RdevMinor,
 			LinkTarget: f.LinkTarget,
+			TopDir:     f.Flags&rsync.XMIT_TOP_DIR != 0,
 		}
 		copy(fe.Checksum[:], f.Checksum[:])
 		entries[i] = fe
