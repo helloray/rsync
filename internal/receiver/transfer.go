@@ -80,6 +80,11 @@ type Transfer struct {
 	Groups          map[int32]mapping
 	retouchDirPerms bool
 
+	// inc holds the incremental-recursion receiver state; nil when the
+	// transfer uses a complete file list. Set by ReceiveFileList before the
+	// transfer goroutines start.
+	inc *incRecv
+
 	// delStats counts what deleteFiles removed, reported to the sender as
 	// NDX_DEL_STATS at protocol >= 31 (rsync/main.c:write_del_stats).
 	delStats delStats

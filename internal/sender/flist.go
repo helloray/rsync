@@ -54,6 +54,10 @@ type fileList struct {
 	TotalSize int64
 	Files     []file
 	Sources   []FileSource
+
+	// inc is non-nil under incremental recursion: it owns the segment
+	// scheduler and the ndx → file mapping for SendFiles.
+	inc *incSched
 }
 
 // A fileList must not be used after calling Close().
@@ -437,6 +441,7 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 	// _c-rsync/flist.c:send_file_list + uidlist.c:send_id_lists. The encoder
 	// owns the cross-entry compression state (SAME_NAME prefix, SAME_UID/GID,
 	// rdev major) so no per-entry scratch is needed here.
+	p := st.flistParams()
 	entries := make([]*flist.FileEntry, len(fileList.Files))
 	for i := range fileList.Files {
 		f := &fileList.Files[i]
@@ -452,12 +457,31 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 			LinkTarget: f.LinkTarget,
 			TopDir:     f.Flags&rsync.XMIT_TOP_DIR != 0,
 		}
+		if p.IncRecurse && !p.NumericIDs {
+			// protocol >= 30 inc-recurse: uid/gid names ride inline in the
+			// entries (XMIT_USER_NAME_FOLLOWS); there are no trailing lists.
+			fe.User = uidMap[f.Uid]
+			fe.Group = gidMap[f.Gid]
+		}
 		copy(fe.Checksum[:], f.Checksum[:])
 		entries[i] = fe
 	}
 
+	if p.IncRecurse {
+		// incremental recursion: send the initial list now; the per-dir
+		// segments follow lazily from the SendFiles loop.
+		enc := flist.NewEncoder(p)
+		inc := newIncSched(st, enc, entries, ioErrors)
+		if err := inc.emit(0); err != nil {
+			return nil, err
+		}
+		inc.sentUpTo = 1 // segment 0 is on the wire; topUp starts at segment 1
+		fileList.inc = inc
+		return &fileList, nil
+	}
+
 	fec.Reset()
-	if err := flist.WriteFileList(fec, st.flistParams(), entries, uidMap, gidMap, ioErrors); err != nil {
+	if err := flist.WriteFileList(fec, p, entries, uidMap, gidMap, ioErrors); err != nil {
 		return nil, err
 	}
 	if err := st.Conn.WriteString(fec.String()); err != nil {
@@ -468,9 +492,10 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 }
 
 // flistParams derives the flist codec parameters for this sender from the
-// negotiated session and options. NumericIDs is always true: this sender does
-// not transmit inline uid/gid names, so the names ride the trailing id list at
-// every protocol.
+// negotiated session and options. Without incremental recursion NumericIDs is
+// always true: this sender does not transmit inline uid/gid names, so the
+// names ride the trailing id list at every protocol. Under inc-recurse there
+// are no trailing id lists at all, so the names must ride inline.
 func (st *Transfer) flistParams() flist.Params {
 	p := flist.Params{
 		ProtocolVersion:  st.Opts.ProtocolVersion(),
@@ -486,6 +511,10 @@ func (st *Transfer) flistParams() flist.Params {
 		p.VarintFlags = st.Session.VarintFlistFlags
 		p.IncRecurse = st.Session.IncRecurse
 		p.ID0Names = st.Session.ID0Names
+		p.SafeFlist = st.Session.SafeFlist
+		if p.IncRecurse {
+			p.NumericIDs = false
+		}
 	}
 	return p
 }

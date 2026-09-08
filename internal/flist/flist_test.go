@@ -159,7 +159,7 @@ func TestCompleteReaderRoundtrip(t *testing.T) {
 		uidNames := map[int32]string{1000: "alice"}
 		gidNames := map[int32]string{1000: "staff"}
 		var buf bytes.Buffer
-		if err := WriteFileList(&buf, p, files, uidNames, gidNames, 42); err != nil {
+		if err := WriteFileList(&buf, p, files, uidNames, gidNames, 3); err != nil {
 			t.Fatalf("v%d WriteFileList: %v", version, err)
 		}
 		r := NewCompleteReader(bytes.NewReader(buf.Bytes()), p)
@@ -167,8 +167,8 @@ func TestCompleteReaderRoundtrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("v%d Next: %v", version, err)
 		}
-		if !seg.EOF || seg.IOError != 42 {
-			t.Errorf("v%d seg EOF=%v IOError=%d, want EOF=true IOError=42", version, seg.EOF, seg.IOError)
+		if !seg.EOF || seg.IOError != 3 {
+			t.Errorf("v%d seg EOF=%v IOError=%d, want EOF=true IOError=3", version, seg.EOF, seg.IOError)
 		}
 		if seg.NdxStart != 0 || len(seg.Entries) != len(files) {
 			t.Fatalf("v%d NdxStart=%d n=%d, want 0/%d", version, seg.NdxStart, len(seg.Entries), len(files))
@@ -208,7 +208,7 @@ func TestEncoderDecoderStream(t *testing.T) {
 				t.Fatalf("v%d encode: %v", version, err)
 			}
 		}
-		if err := writeByte(&buf, 0); err != nil { // terminator
+		if err := enc.WriteEndOfFlist(&buf, false, 0); err != nil { // terminator
 			t.Fatal(err)
 		}
 		var got []*FileEntry

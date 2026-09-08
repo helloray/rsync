@@ -121,7 +121,7 @@ func (rt *Transfer) writeDelStats() error {
 
 // rsync/main.c:do_recv
 func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsyncstats.TransferStats, error) {
-	if rt.Opts.DeleteMode {
+	if rt.inc == nil && rt.Opts.DeleteMode {
 		if err := rt.deleteFiles(fileList); err != nil {
 			return nil, err
 		}
@@ -141,10 +141,19 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 		}
 		return err
 	}
+	if rt.inc != nil && rt.Opts.DeleteMode {
+		// Incremental recursion: the complete list only exists once every
+		// segment has arrived, so the deletion pass waits for that and then
+		// runs concurrently with the generator (C's delete-during).
+		eg.Go(func() error { return closeOnErr(rt.deleteIncWhenReady()) })
+	}
 	eg.Go(func() error { return closeOnErr(rt.GenerateFiles(fileList)) })
 	eg.Go(func() error { return closeOnErr(rt.RecvFiles(fileList)) })
 	if err := eg.Wait(); err != nil {
 		return nil, err
+	}
+	if rt.inc != nil {
+		fileList = rt.inc.snapshot()
 	}
 	if rt.retouchDirPerms /* || rt.retouchDirTimes */ {
 		if err := rt.touchUpDirs(fileList); err != nil {

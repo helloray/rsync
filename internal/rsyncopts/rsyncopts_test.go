@@ -259,14 +259,14 @@ func TestServerOptionsClientInfo(t *testing.T) {
 		}
 	})
 
-	// 'i' is only advertised once incremental recursion is actually
-	// implemented (protocol.SupportsIncrementalRecursion, currently false):
-	// a server that receives 'i' switches to inc-recurse wire framing.
-	t.Run("proto30_receiver_inc_gated_off", func(t *testing.T) {
+	// 'i' is advertised once incremental recursion is implemented
+	// (protocol.SupportsIncrementalRecursion): a server that receives 'i'
+	// switches to inc-recurse wire framing.
+	t.Run("proto30_receiver_inc", func(t *testing.T) {
 		o := NewOptions(rsyncostest.New(t))
 		o.protocol_version = 30
 		o.recurse = 2
-		findToken(t, o.ServerOptions(), "-re.LfxCvIu")
+		findToken(t, o.ServerOptions(), "-re.iLfxCvIu")
 	})
 
 	t.Run("proto30_receiver_no_inc_delete_before", func(t *testing.T) {
@@ -283,12 +283,12 @@ func TestServerOptionsClientInfo(t *testing.T) {
 		findToken(t, o.ServerOptions(), "-e.LfxCvIu")
 	})
 
-	t.Run("proto30_sender_inc_gated_off", func(t *testing.T) {
+	t.Run("proto30_sender_inc", func(t *testing.T) {
 		o := NewOptions(rsyncostest.New(t))
 		o.protocol_version = 30
 		o.recurse = 2
 		o.am_sender = 1
-		findToken(t, o.ServerOptions(), "-re.LfxCvIu")
+		findToken(t, o.ServerOptions(), "-re.iLfxCvIu")
 	})
 
 	// The server side derives client_info from the -e value of the combined

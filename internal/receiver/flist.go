@@ -68,6 +68,11 @@ type File struct {
 	RdevMajor  int32
 	RdevMinor  int32
 	Checksum   [rsyncchecksum.Size]byte
+
+	// Ndx is the file's wire index: the position in a complete list, or the
+	// ndx_start-chain value under incremental recursion. The generator sends
+	// requests with it and the frame loop routes incoming data with it.
+	Ndx int32
 }
 
 // FileMode converts from the Linux permission bits to Go’s permission bits.
@@ -95,11 +100,17 @@ func (f *File) FileMode() fs.FileMode {
 
 // rsync/flist.c:recv_file_list
 func (rt *Transfer) ReceiveFileList() ([]*File, error) {
+	p := rt.flistParams()
+	if p.IncRecurse {
+		// Incremental recursion: only the initial segment is read here; the
+		// per-directory segments are decoded by the frame loop.
+		return rt.receiveFileListInc(p)
+	}
 	if rt.Opts.Progress {
 		fmt.Fprintln(rt.Env.Stdout, "receiving file list...")
 		fmt.Fprint(rt.Env.Stdout, "0 files to consider")
 	}
-	r := flist.NewCompleteReader(rt.Conn, rt.flistParams())
+	r := flist.NewCompleteReader(rt.Conn, p)
 	seg, err := r.Next()
 	if err != nil {
 		return nil, err
@@ -123,6 +134,9 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 	}
 
 	rt.sortFileList(fileList)
+	for i, f := range fileList {
+		f.Ndx = int32(i)
+	}
 
 	// The trailing uid/gid id lists and the i/o error word are consumed inside
 	// flist.ReadFileList; the error word is surfaced here for the transfer-level
@@ -132,9 +146,10 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 }
 
 // flistParams derives the flist codec parameters for this receiver from the
-// negotiated session and options. NumericIDs is always true: this receiver
-// does not perform uid/gid-name remapping, so names ride the trailing id list
-// at every protocol.
+// negotiated session and options. Without incremental recursion NumericIDs is
+// always true: this receiver does not perform uid/gid-name remapping, so
+// names ride the trailing id list at every protocol. Under inc-recurse there
+// are no trailing id lists, so names ride inline and NumericIDs must be false.
 func (rt *Transfer) flistParams() flist.Params {
 	p := flist.Params{
 		ProtocolVersion:  rt.ProtocolVersion(),
@@ -150,6 +165,10 @@ func (rt *Transfer) flistParams() flist.Params {
 		p.VarintFlags = rt.Session.VarintFlistFlags
 		p.IncRecurse = rt.Session.IncRecurse
 		p.ID0Names = rt.Session.ID0Names
+		p.SafeFlist = rt.Session.SafeFlist
+		if p.IncRecurse {
+			p.NumericIDs = false
+		}
 	}
 	return p
 }

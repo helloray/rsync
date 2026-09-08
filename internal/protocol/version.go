@@ -59,11 +59,10 @@ func SupportsExtendedGoodbye(protocolVersion int) bool {
 
 // SupportsIncrementalRecursion reports whether this build implements
 // incremental recursion (--inc-recursive, the protocol-30+ incremental file
-// list exchange). It is false until Phase E lands, so both sides fall back to
-// the complete file list even when a peer would accept incremental framing.
-// Advertising CF_INC_RECURSE without incremental transfer support would make
-// the peer's receiver skip the trailing id lists that we still write (we send
-// numeric-only lists), desyncing the file list decode.
+// list exchange). When true, the handshake may advertise CF_INC_RECURSE and
+// both sides use the segment-based file list framing; peers that disable it
+// (--delete-before/--delete-after/--delay-updates, --protocol<30) fall back
+// to the complete file list.
 func SupportsIncrementalRecursion() bool {
-	return false
+	return true
 }

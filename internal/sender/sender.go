@@ -79,6 +79,14 @@ func (st *Transfer) writeNdxAndAttrs(fileIndex int32, iflags uint16, fnamecmpTyp
 func (st *Transfer) SendFiles(fileList *fileList) error {
 	phase := 0
 	for {
+		// rsync/sender.c:send_files: under incremental recursion, top up the
+		// receiver's segment backlog before blocking on the next request.
+		if fileList.inc != nil {
+			if err := fileList.inc.topUp(); err != nil {
+				return err
+			}
+		}
+
 		// receive data about receiver’s copy of the file list contents (not
 		// ordered)
 		// see (*rsync.Receiver).Generator()
@@ -96,6 +104,21 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			return err
 		}
 		if fileIndex == -1 {
+			// rsync/sender.c:send_files: under incremental recursion the
+			// generator emits one DONE per completed file-list; the sender
+			// frees the oldest list and echoes the DONE instead of counting
+			// a phase while lists remain (sender.c:530-538). Freeing the
+			// last list falls through to the phase counting below — that
+			// single DONE marker carries both roles (sender.c:540).
+			if fileList.inc != nil {
+				freed, more := fileList.inc.releaseDone()
+				if freed && more {
+					if err := st.ndxWrite().WriteNdx(st.Conn, protocol.NdxDone); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			phase++
 			// rsync/sender.c:send_files: max_phase is 2 with protocol >= 29,
 			// so the sender reads three phase-done markers in total,
@@ -155,7 +178,27 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 				}
 			}
 		}
-		if fileIndex < 0 || int(fileIndex) >= len(fileList.Files) {
+		flatIdx := int(fileIndex)
+		if fileList.inc != nil {
+			// Under incremental recursion the ndx space follows the segment
+			// chain; map it back to the flat list and advance the receiver's
+			// position to free lookahead budget. Indices below the current
+			// segment's ndx_start are legitimate: the generator itemizes a
+			// segment's parent dir with ndx_start-1 (rsync/generator.c:2787),
+			// and such itemizes never carry ITEM_TRANSFER, so no flat mapping
+			// is needed (rsync/sender.c:551-557 resolves them to the dir).
+			idx, ok := fileList.inc.advance(fileIndex)
+			if ok {
+				flatIdx = idx
+			} else if iflags&rsync.ITEM_TRANSFER != 0 {
+				return fmt.Errorf("invalid file index %d under incremental recursion", fileIndex)
+			}
+			// rsync/sender.c:548: top up again after the request advanced
+			// the receiver's current file-list.
+			if err := fileList.inc.topUp(); err != nil {
+				return err
+			}
+		} else if fileIndex < 0 || int(fileIndex) >= len(fileList.Files) {
 			return fmt.Errorf("invalid file index %d (list has %d entries)",
 				fileIndex, len(fileList.Files))
 		}
@@ -176,7 +219,7 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			continue
 		}
 
-		fl := fileList.Files[fileIndex]
+		fl := fileList.Files[flatIdx]
 		st.Progress.Reset(uint64(fl.Length))
 
 		head, err := st.receiveSums()

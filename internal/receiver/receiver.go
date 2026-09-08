@@ -17,6 +17,11 @@ import (
 
 // rsync/receiver.c:recv_files
 func (rt *Transfer) RecvFiles(fileList []*File) error {
+	if rt.inc != nil {
+		// Incremental recursion: the frame loop also consumes the file-list
+		// segments interleaved with the file data.
+		return rt.recvFilesInc()
+	}
 	// rsync/receiver.c:recv_files: max_phase is 2 with protocol >= 29, so
 	// the receiver reads three phase-done markers in total (two phase
 	// transitions and the final marker).

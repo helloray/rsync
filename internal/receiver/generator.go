@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gokrazy/rsync"
-	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsynccommon"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -19,47 +18,18 @@ import (
 
 // rsync/generator.c:generate_files()
 func (rt *Transfer) GenerateFiles(fileList []*File) error {
-	phase := 0
-	for idx, f := range fileList {
-		if err := rt.recvGenerator(idx, f); err != nil {
+	if rt.inc != nil {
+		// Incremental recursion: consume the shared entry queue and release
+		// completed segments instead of walking a complete list.
+		return rt.generateFilesInc()
+	}
+	for _, f := range fileList {
+		if err := rt.recvGenerator(f); err != nil {
 			return err
 		}
 	}
-	phase++
-	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
-		rt.Logger.Printf("generateFiles phase=%d", phase)
-	}
-	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
+	if err := rt.writePhaseDones(); err != nil {
 		return err
-	}
-
-	// TODO: re-do any files that failed
-	phase++
-	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
-		rt.Logger.Printf("generateFiles phase=%d", phase)
-	}
-	if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
-		return err
-	}
-
-	// rsync/generator.c:2873-2877: at protocol >= 31 the generator reports its
-	// delete counters between the second and third phase-done markers.
-	if protocol.SupportsDeleteStats(rt.ProtocolVersion()) && rt.Opts.DeleteMode {
-		if err := rt.writeDelStats(); err != nil {
-			return err
-		}
-	}
-
-	// rsync/generator.c:2882-2890: with protocol >= 29, the generator
-	// closes a third (delay-updates) phase.
-	if protocol.SupportsMultiPhase(rt.ProtocolVersion()) {
-		phase++
-		if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
-			rt.Logger.Printf("generateFiles phase=%d", phase)
-		}
-		if err := rt.writeNdx(protocol.NdxDone, 0); err != nil {
-			return err
-		}
 	}
 
 	// NOTE: touchUpDirs is called from [Transfer.Do]
@@ -161,7 +131,7 @@ func (rt *Transfer) setPerms(f *File, mode fs.FileMode) error {
 }
 
 // rsync/generator.c:recv_generator
-func (rt *Transfer) recvGenerator(idx int, f *File) error {
+func (rt *Transfer) recvGenerator(f *File) error {
 	if rt.listOnly() {
 		fmt.Fprintf(rt.Env.Stdout, "%s %11.0f %s %s\n",
 			f.FileMode().String(),
@@ -270,7 +240,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 			rt.Logger.Printf("requesting: %s", f.Name)
 		}
-		if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
+		if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
 		if rt.Opts.DryRun {
@@ -289,7 +259,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 			if pin, psize, ok := rt.openPartialBasis(f); ok {
 				defer pin.Close()
 				rt.Logger.Printf("resuming %s from partial (%d bytes)", f.Name, psize)
-				if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
+				if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 					return err
 				}
 				return rt.generateAndSendSums(pin, psize)
@@ -327,7 +297,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 	}
 
 	if rt.Opts.DryRun {
-		if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
+		if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
 
@@ -346,7 +316,7 @@ func (rt *Transfer) recvGenerator(idx int, f *File) error {
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {
 		rt.Logger.Printf("sending sums for: %s", f.Name)
 	}
-	if err := rt.writeNdx(int32(idx), rsync.ITEM_TRANSFER); err != nil {
+	if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 		return err
 	}
 

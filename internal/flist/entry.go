@@ -43,6 +43,11 @@ type Params struct {
 	// incremental recursion the names travel in the trailing id list.
 	IncRecurse bool
 
+	// SafeFlist mirrors C's use_safe_inc_flist (CF_SAFE_FLIST or protocol
+	// >= 31): it permits the XMIT_IO_ERROR_ENDLIST sentinel terminator and
+	// the inline i/o-error word in non-varint mode.
+	SafeFlist bool
+
 	// ID0Names reports whether the uid/gid id lists additionally carry a
 	// terminator name for id 0 (CF_ID0_NAMES). When set, each trailing list is
 	// followed by the id-0 name, and the sender must emit it or the receiver
@@ -72,10 +77,17 @@ type FileEntry struct {
 
 // IS_* helpers mirror the S_IS* macros; FileEntry.Mode carries the Linux st_mode
 // bits (type in the top bits, perms in the low 9).
-func (f *FileEntry) isDir() bool    { return f.Mode&rsync.S_IFMT == rsync.S_IFDIR }
-func (f *FileEntry) isReg() bool    { return f.Mode&rsync.S_IFMT == rsync.S_IFREG }
-func (f *FileEntry) isLink() bool   { return f.Mode&rsync.S_IFMT == rsync.S_IFLNK }
-func (f *FileEntry) isDevice() bool { m := f.Mode & rsync.S_IFMT; return m == rsync.S_IFCHR || m == rsync.S_IFBLK }
+func (f *FileEntry) isDir() bool { return f.Mode&rsync.S_IFMT == rsync.S_IFDIR }
+
+// IsDir reports whether the entry is a directory (exported helper for
+// packages outside flist that partition entry lists).
+func (f *FileEntry) IsDir() bool  { return f.isDir() }
+func (f *FileEntry) isReg() bool  { return f.Mode&rsync.S_IFMT == rsync.S_IFREG }
+func (f *FileEntry) isLink() bool { return f.Mode&rsync.S_IFMT == rsync.S_IFLNK }
+func (f *FileEntry) isDevice() bool {
+	m := f.Mode & rsync.S_IFMT
+	return m == rsync.S_IFCHR || m == rsync.S_IFBLK
+}
 func (f *FileEntry) isSpecial() bool {
 	m := f.Mode & rsync.S_IFMT
 	return m == rsync.S_IFIFO || m == rsync.S_IFSOCK

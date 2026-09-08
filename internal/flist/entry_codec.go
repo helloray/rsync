@@ -20,13 +20,32 @@ func NewEncoder(p Params) *Encoder { return &Encoder{c: codec{params: p}} }
 // Encode writes one entry.
 func (e *Encoder) Encode(w io.Writer, f *FileEntry) error { return e.c.Encode(w, f) }
 
+// WriteEndOfFlist writes the end-of-list terminator for a file-list segment,
+// mirroring _c-rsync/flist.c:write_end_of_flist. The compression state is
+// untouched: the next Encode continues the cross-entry shorthand relative to
+// the last entry before the terminator (C keeps lastname in function statics
+// across flists).
+func (e *Encoder) WriteEndOfFlist(w io.Writer, sendIOError bool, ioErrors int32) error {
+	return writeEndOfFlist(w, e.c.params, sendIOError, ioErrors)
+}
+
 // Decoder reads file-list entries one at a time, maintaining the cross-entry
 // compression state across calls. It returns io.EOF when the end-of-list
 // terminator (a zero flags frame) is reached.
-type Decoder struct{ c codec }
+type Decoder struct {
+	c codec
+	// ioErrors accumulates the i/o-error words carried by end-of-list
+	// terminators (varint mode or sentinel), mirroring the C receiver's
+	// io_error |= err & IOERR_VALID_MASK per flist.
+	ioErrors int32
+}
 
 // NewDecoder returns a Decoder for the given negotiation parameters.
 func NewDecoder(p Params) *Decoder { return &Decoder{c: codec{params: p}} }
+
+// IOError returns the accumulated i/o-error word from all end-of-list
+// terminators consumed by Decode so far.
+func (d *Decoder) IOError() int32 { return d.ioErrors }
 
 // Decode reads the next entry, returning io.EOF at the end of the list.
 func (d *Decoder) Decode(r io.Reader) (*FileEntry, error) {
@@ -35,6 +54,29 @@ func (d *Decoder) Decode(r io.Reader) (*FileEntry, error) {
 		return nil, err
 	}
 	if xflags == 0 {
+		// varint-mode terminator: the i/o-error word follows and must be
+		// consumed here so the caller stays framed for the next segment
+		// header (flist.c:2946-2949).
+		if d.c.params.ProtocolVersion >= 30 && d.c.params.VarintFlags {
+			v, err := protocol.ReadVarint(r)
+			if err != nil {
+				return nil, err
+			}
+			d.ioErrors |= v & ioerrValidMask
+		}
+		return nil, io.EOF
+	}
+	// non-varint sentinel terminator carrying the i/o error word
+	// (flist.c:2960-2971).
+	if xflags == rsync.XMIT_EXTENDED_FLAGS|rsync.XMIT_IO_ERROR_ENDLIST {
+		if !d.c.params.SafeFlist {
+			return nil, fmt.Errorf("invalid flist flag: %x", xflags)
+		}
+		v, err := protocol.ReadVarint(r)
+		if err != nil {
+			return nil, err
+		}
+		d.ioErrors |= v & ioerrValidMask
 		return nil, io.EOF
 	}
 	return d.c.decode(r, xflags)
@@ -63,10 +105,13 @@ type codec struct {
 func (c *codec) Encode(w io.Writer, f *FileEntry) error {
 	var xflags uint32
 
-	// rsync/flist.c:send_file_entry: below protocol 30 the FLAG_TOP_DIR mark
-	// rides XMIT_TOP_DIR (same bit value) — the pre-29 receiver maps it back
-	// to FLAG_TOP_DIR and uses it to drive the per-top-dir delete pass.
-	if c.params.ProtocolVersion < 30 && f.isDir() && f.TopDir {
+	// rsync/flist.c:send_file_entry: FLAG_TOP_DIR rides XMIT_TOP_DIR (same
+	// bit value) at every protocol — the pre-29 receiver maps it back to
+	// FLAG_TOP_DIR for the per-top-dir delete pass; at >= 30 the bit marks
+	// the transfer roots among content dirs (a dir without content would
+	// carry XMIT_NO_CONTENT_DIR, which this sender never emits since it
+	// sends a segment for every dir).
+	if f.isDir() && f.TopDir {
 		xflags |= rsync.XMIT_TOP_DIR
 	}
 
