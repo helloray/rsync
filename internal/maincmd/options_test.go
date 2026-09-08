@@ -2,6 +2,7 @@ package maincmd
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -114,6 +115,32 @@ func TestParseHostspec(t *testing.T) {
 			}
 			if port != tt.wantPort {
 				t.Errorf("unexpected port: got %d, want %d", port, tt.wantPort)
+			}
+		})
+	}
+}
+
+// On Windows, a local disk path like C:\rsync or C:/rsync must not parse
+// as host="C" — it must be rejected so the caller treats the argument as a
+// local path.
+func TestParseHostspecLocalDiskPath(t *testing.T) {
+	for _, tt := range []struct {
+		src string
+	}{
+		{src: "C:/rsync"},
+		{src: "c:/some/dir"},
+		{src: "Z:/"},   // separator right after the drive letter
+		{src: "C:"},    // must not panic
+		{src: "C:\\"},  // must not panic
+		{src: "C:\\rsync"},
+	} {
+		if runtime.GOOS != "windows" && tt.src[1] == '\\' {
+			continue // os.PathSeparator is '/' elsewhere; backslash case N/A
+		}
+		t.Run(tt.src, func(t *testing.T) {
+			host, path, port, err := parseHostspec(tt.src, false)
+			if err == nil {
+				t.Fatalf("parseHostspec(%q) = host=%q path=%q port=%d, want error", tt.src, host, path, port)
 			}
 		})
 	}

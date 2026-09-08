@@ -713,6 +713,13 @@ func (o *Options) ProtocolVersion() int { return o.protocol_version }
 func (o *Options) SetProtocolVersion(v int) { o.protocol_version = v }
 func (o *Options) UpdateOnly() bool           { return o.update_only != 0 }
 func (o *Options) DryRun() bool               { return o.dry_run != 0 }
+
+// NumericIds reports whether --numeric-ids was requested: uid/gid names are
+// neither transmitted inline nor in the trailing id lists (C's numeric_ids).
+func (o *Options) NumericIds() bool { return o.numeric_ids != 0 }
+
+// IOTimeout returns the --timeout value in seconds (0 = disabled).
+func (o *Options) IOTimeout() int { return o.io_timeout }
 func (o *Options) PreserveLinks() bool        { return o.preserve_links != 0 }
 func (o *Options) PreserveUid() bool          { return o.preserve_uid != 0 }
 func (o *Options) PreserveGid() bool          { return o.preserve_gid != 0 }

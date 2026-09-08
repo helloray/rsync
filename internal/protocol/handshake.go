@@ -21,9 +21,9 @@ type wireConn interface {
 // HandshakeParams carries the options that shape one side of the binary
 // handshake (rsync/compat.c:setup_protocol + negotiate_the_strings).
 type HandshakeParams struct {
-	// Version is the already-negotiated protocol version. For the command
-	// (ssh) path this is produced by negotiateProtocolVersion; for the
-	// daemon path the caller derives it from the @RSYNCD: greeting.
+	// Version is the already-negotiated protocol version: for the daemon
+	// path derived from the @RSYNCD: greeting, for the command (ssh) path
+	// from the caller's version exchange.
 	Version int
 
 	// ClientInfo is the content of the -e option received from the peer
@@ -41,26 +41,10 @@ type HandshakeParams struct {
 }
 
 // ChecksumList is the checksum algorithms we can produce, strongest first.
-// The handshake negotiates the strongest mutual algorithm. Only md4 is
-// currently implemented, which rsync continues to accept at protocol >= 30.
-var ChecksumList = []string{"md4"}
-
-// negotiateProtocolVersion performs the binary version exchange
-// (rsync/compat.c:setup_protocol): both sides write their maximum version,
-// then read the peer's, and the negotiated version is the lower of the two.
-func negotiateProtocolVersion(c wireConn, ourVersion int) (int, error) {
-	if err := c.WriteInt32(int32(ourVersion)); err != nil {
-		return 0, err
-	}
-	remote, err := c.ReadInt32()
-	if err != nil {
-		return 0, err
-	}
-	if remote < 27 {
-		return 0, fmt.Errorf("protocol version mismatch: remote %d is older than minimum 27", remote)
-	}
-	return int(min(int32(ourVersion), remote)), nil
-}
+// The handshake negotiates the strongest mutual algorithm. Both entries are
+// implemented end-to-end (rsyncchecksum): md5 is preferred; md4 keeps
+// protocol < 30 sessions and very old peers working.
+var ChecksumList = []string{"md5", "md4"}
 
 // serverCompatFlags builds the compatibility-flags bitmask the server sends,
 // from its own capabilities and the client's -e information

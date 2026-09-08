@@ -14,7 +14,6 @@ import (
 	"github.com/gokrazy/rsync/internal/rsynccommon"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
 	"github.com/gokrazy/rsync/internal/rsyncwire"
-	"github.com/mmcloughlin/md4"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -25,6 +24,21 @@ func (st *Transfer) ndxWrite() *protocol.NdxCodec {
 		st.ndxWriteC = protocol.NewNdxCodec(st.Opts.ProtocolVersion())
 	}
 	return st.ndxWriteC
+}
+
+// checksumAlgo returns the negotiated strong-checksum algorithm name,
+// defaulting to md4 for legacy sessions without a negotiated Session.
+func (st *Transfer) checksumAlgo() string {
+	if st.Session != nil && st.Session.ChecksumAlgo != "" {
+		return st.Session.ChecksumAlgo
+	}
+	return "md4"
+}
+
+// properSeedOrder reports whether the checksum seed-order fix was negotiated
+// (CF_CHKSUM_SEED_FIX): md5 block checksums feed the seed before the data.
+func (st *Transfer) properSeedOrder() bool {
+	return st.Session != nil && st.Session.ProperSeedOrder
 }
 
 // ndxRead returns the NDX reader codec, creating it from the negotiated
@@ -368,10 +382,10 @@ func (st *Transfer) sendFile(fileIndex int32, fl file) error {
 		fmt.Fprintln(st.Env.Stdout, fl.path)
 	}
 
-	h := md4.New()
-	// Mirror C's sum_init seed gating (see match.go): protocol < 30 folds the
-	// checksum seed, >= 30 does not. Must match the receiver and C counterpart.
-	if st.Opts.ProtocolVersion() < 30 {
+	// Mirror C's sum_init seed gating (see match.go): md5 is a plain digest;
+	// md4 folds the checksum seed only at protocol < 30 (CSUM_MD4_OLD).
+	h := rsyncchecksum.NewStrong(st.checksumAlgo())
+	if algo := st.checksumAlgo(); algo == "md4" && st.Opts.ProtocolVersion() < 30 {
 		binary.Write(h, binary.LittleEndian, st.Seed)
 	}
 

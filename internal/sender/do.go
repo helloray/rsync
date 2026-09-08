@@ -91,6 +91,12 @@ func (st *Transfer) Do(crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWri
 	}
 
 	if err := st.SendFiles(fileList); err != nil {
+		// rsync/io.c:send_msg(MSG_ERROR_EXIT): tell the peer the transfer is
+		// aborting so it reports our error instead of waiting for data that
+		// will never come.
+		if serr := st.Conn.SendErrorExit(err.Error()); serr != nil {
+			st.Logger.Printf("sending error-exit: %v", serr)
+		}
 		return nil, err
 	}
 

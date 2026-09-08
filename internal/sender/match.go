@@ -9,7 +9,6 @@ import (
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
-	"github.com/mmcloughlin/md4"
 )
 
 type target struct {
@@ -48,13 +47,12 @@ func (st *Transfer) hashSearch(targets []target, tagTable map[uint16]int, head r
 		fmt.Fprintln(st.Env.Stdout, fl.path)
 	}
 
-	// sum_init(): mirrors C's checksum.c. At protocol < 30 "md4" is the seeded
-	// CSUM_MD4_OLD, so the checksum seed is folded in; at protocol >= 30 it is
-	// the modern CSUM_MD4 which is computed over the file data only. This must
-	// match the receiver (receiver.go) and the C counterpart exactly, or the
-	// whole-file verification check strands the file.
-	h := md4.New()
-	if st.Opts.ProtocolVersion() < 30 {
+	// sum_init(): mirrors C's checksum.c. md5 is a plain digest; md4 folds the
+	// checksum seed only at protocol < 30 (CSUM_MD4_OLD). This must match the
+	// receiver (receiver.go) and the C counterpart exactly, or the whole-file
+	// verification check strands the file.
+	h := rsyncchecksum.NewStrong(st.checksumAlgo())
+	if algo := st.checksumAlgo(); algo == "md4" && st.Opts.ProtocolVersion() < 30 {
 		binary.Write(h, binary.LittleEndian, st.Seed)
 	}
 
@@ -132,7 +130,7 @@ Outer:
 					if err != nil {
 						return err
 					}
-					sum2 = rsyncchecksum.Checksum2(st.Seed, buf[:])
+					sum2 = rsyncchecksum.Checksum2(st.checksumAlgo(), st.properSeedOrder(), st.Seed, buf[:])
 					doneCsum2 = true
 				}
 

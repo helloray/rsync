@@ -55,6 +55,13 @@ func isSwallowable(tag uint8, payload []byte) bool {
 	switch tag {
 	case MsgInfo, MsgNoOp:
 		return true
+	case MsgIoTimeout:
+		// A daemon announces its --timeout at protocol >= 31
+		// (rsync/main.c:1304); C adopts it only as a stricter cap of the
+		// client's own timeout. We run no idle watchdog, so there is nothing
+		// to shorten — consume the frame so it never surfaces as a spurious
+		// control error in the data stream.
+		return true
 	case MsgData:
 		return len(payload) == 0
 	}
@@ -161,8 +168,9 @@ type Buffer struct {
 	buf bytes.Buffer
 }
 
-func (b *Buffer) WriteByte(data byte) {
+func (b *Buffer) WriteByte(data byte) error {
 	binary.Write(&b.buf, binary.LittleEndian, data)
+	return nil
 }
 
 func (b *Buffer) WriteInt32(data int32) {
@@ -213,6 +221,41 @@ func (c *Conn) Close() error {
 		return wcErr
 	}
 	return rcErr
+}
+
+// msgWriter is implemented by writers that can carry multiplex control
+// frames. CountingWriter forwards it to the underlying MultiplexWriter, so
+// Conn helpers below work no matter how many wrappers surround it.
+type msgWriter interface {
+	WriteMsg(tag uint8, p []byte) (n int, err error)
+}
+
+// SendErrorExit best-effort sends an MSG_ERROR_EXIT control frame carrying
+// msg, mirroring C's send_msg(MSG_ERROR_EXIT, ...) abort path (rsync/io.c):
+// the peer surfaces the frame as a fatal error instead of hanging or seeing
+// a bare EOF. It is a no-op when the write direction is not multiplexed
+// (raw streams below protocol 30 cannot carry control frames).
+func (c *Conn) SendErrorExit(msg string) error {
+	return sendControlMsg(c.Writer, MsgErrorExit, []byte(msg))
+}
+
+// SendIoTimeout best-effort sends an MSG_IO_TIMEOUT control frame announcing
+// the daemon's --timeout, mirroring rsync/main.c:1304 (am_daemon && io_timeout
+// && protocol_version >= 31). The peer may adopt it only as a stricter cap of
+// its own timeout.
+func (c *Conn) SendIoTimeout(seconds int) error {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(seconds))
+	return sendControlMsg(c.Writer, MsgIoTimeout, b[:])
+}
+
+func sendControlMsg(w io.Writer, tag uint8, p []byte) error {
+	mw, ok := w.(msgWriter)
+	if !ok {
+		return nil
+	}
+	_, err := mw.WriteMsg(tag, p)
+	return err
 }
 
 func (c *Conn) WriteByte(data byte) error {
@@ -359,6 +402,16 @@ func (w *CountingWriter) Write(p []byte) (n int, err error) {
 	n, err = w.W.Write(p)
 	w.BytesWritten += int64(n)
 	return n, err
+}
+
+// WriteMsg forwards multiplex control frames to the underlying writer so
+// Conn.SendErrorExit / Conn.SendIoTimeout reach the wire through this wrapper.
+func (w *CountingWriter) WriteMsg(tag uint8, p []byte) (int, error) {
+	mw, ok := w.W.(msgWriter)
+	if !ok {
+		return 0, nil
+	}
+	return mw.WriteMsg(tag, p)
 }
 
 func (w *CountingWriter) Close() error { return w.W.Close() }

@@ -311,7 +311,7 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			checksum, err = rsyncchecksum.ReaderChecksum(fh)
+			checksum, err = rsyncchecksum.ReaderChecksum(s.st.checksumAlgo(), fh)
 			fh.Close()
 			if err != nil {
 				return err
@@ -492,10 +492,10 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 }
 
 // flistParams derives the flist codec parameters for this sender from the
-// negotiated session and options. Without incremental recursion NumericIDs is
-// always true: this sender does not transmit inline uid/gid names, so the
-// names ride the trailing id list at every protocol. Under inc-recurse there
-// are no trailing id lists at all, so the names must ride inline.
+// negotiated session and options. NumericIDs mirrors C's numeric_ids: when
+// --numeric-ids was passed (or forwarded by the client), uid/gid names are
+// neither sent inline nor in the trailing id lists. Under inc-recurse names
+// ride inline and there are no trailing lists at all.
 func (st *Transfer) flistParams() flist.Params {
 	p := flist.Params{
 		ProtocolVersion:  st.Opts.ProtocolVersion(),
@@ -505,16 +505,13 @@ func (st *Transfer) flistParams() flist.Params {
 		PreserveDevices:  st.Opts.PreserveDevices(),
 		PreserveSpecials: st.Opts.PreserveSpecials(),
 		AlwaysChecksum:   st.Opts.AlwaysChecksum(),
-		NumericIDs:       true,
+		NumericIDs:       st.Opts.NumericIds(),
 	}
 	if st.Session != nil {
 		p.VarintFlags = st.Session.VarintFlistFlags
 		p.IncRecurse = st.Session.IncRecurse
 		p.ID0Names = st.Session.ID0Names
 		p.SafeFlist = st.Session.SafeFlist
-		if p.IncRecurse {
-			p.NumericIDs = false
-		}
 	}
 	return p
 }

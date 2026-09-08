@@ -89,12 +89,15 @@ func parseHostspec(src string, parsingURL bool) (host, path string, port int, _ 
 	}
 	host += src[hoststart:hostlen]
 
-	// On Windows, a local disk path like C:\rsync parses as
-	// host="C", path="\\rsync". Detect that and error out.
+	// On Windows, a local disk path like C:\rsync, C:/rsync or C: parses as
+	// host="C" (the drive letter becomes the host). Detect that and error
+	// out so the caller treats the argument as a local path. URL mode is
+	// exempt: "c:8771/x" is a legitimate single-letter host with a port.
 	isDriveLetter := len(host) == 1 &&
 		((host[0] >= 'A' && host[0] <= 'Z') ||
 			(host[0] >= 'a' && host[0] <= 'z'))
-	if isDriveLetter && src[i] == os.PathSeparator {
+	if isDriveLetter && !parsingURL &&
+		(i >= len(src) || src[i] == '/' || src[i] == os.PathSeparator) {
 		return "", "", 0, fmt.Errorf("local disk path detected")
 	}
 

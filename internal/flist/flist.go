@@ -159,17 +159,17 @@ func ReadFileList(r io.Reader, p Params, uidNames, gidNames map[int32]string) ([
 	return files, ioErrors, nil
 }
 
-// atProto30UsesIDList reports whether, at protocol >= 30, a uid/gid name list
-// follows the file entries. With incremental recursion the names ride inline
-// in the entries and there is no trailing list at all — regardless of
-// NumericIDs (flist.c:2820: send_id_lists only when numeric_ids <= 0 &&
-// !inc_recurse); the decision must match between the send and receive halves.
-// At < 30 the trailing id lists always carry the names.
+// atProto30UsesIDList reports whether a trailing uid/gid name list follows
+// the file entries. With incremental recursion the names ride inline in the
+// entries and there is no trailing list at all; with NumericIDs the peer
+// asked for numeric-only transmission. This mirrors C's gate on
+// send_id_lists (flist.c:2820: numeric_ids <= 0 && !inc_recurse); the
+// decision must match between the send and receive halves.
 func atProto30UsesIDList(p Params) bool {
 	if p.ProtocolVersion >= 30 && p.IncRecurse {
 		return false
 	}
-	return true
+	return !p.NumericIDs
 }
 
 // writeInt16 writes a little-endian 16-bit word (C write_shortint).

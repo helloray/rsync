@@ -146,10 +146,10 @@ func (rt *Transfer) ReceiveFileList() ([]*File, error) {
 }
 
 // flistParams derives the flist codec parameters for this receiver from the
-// negotiated session and options. Without incremental recursion NumericIDs is
-// always true: this receiver does not perform uid/gid-name remapping, so
-// names ride the trailing id list at every protocol. Under inc-recurse there
-// are no trailing id lists, so names ride inline and NumericIDs must be false.
+// negotiated session and options. NumericIDs mirrors C's numeric_ids: when the
+// peer passed --numeric-ids (forwarded through server_options), uid/gid names
+// are neither sent inline nor in the trailing id lists. Under inc-recurse
+// names ride inline and there are no trailing lists at all.
 func (rt *Transfer) flistParams() flist.Params {
 	p := flist.Params{
 		ProtocolVersion:  rt.ProtocolVersion(),
@@ -159,16 +159,13 @@ func (rt *Transfer) flistParams() flist.Params {
 		PreserveDevices:  rt.Opts.PreserveDevices,
 		PreserveSpecials: rt.Opts.PreserveSpecials,
 		AlwaysChecksum:   rt.Opts.AlwaysChecksum,
-		NumericIDs:       true,
+		NumericIDs:       rt.Opts.NumericIds,
 	}
 	if rt.Session != nil {
 		p.VarintFlags = rt.Session.VarintFlistFlags
 		p.IncRecurse = rt.Session.IncRecurse
 		p.ID0Names = rt.Session.ID0Names
 		p.SafeFlist = rt.Session.SafeFlist
-		if p.IncRecurse {
-			p.NumericIDs = false
-		}
 	}
 	return p
 }

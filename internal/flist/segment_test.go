@@ -167,8 +167,9 @@ func TestCrossSegmentCompression(t *testing.T) {
 }
 
 // TestAtProto30UsesIDList pins the trailing-id-list decision: under
-// incremental recursion there is never a trailing list at >= 30, matching
-// flist.c:2820 (send_id_lists only when numeric_ids <= 0 && !inc_recurse).
+// incremental recursion there is never a trailing list at >= 30, and with
+// --numeric-ids there is none at any version, matching flist.c:2820
+// (send_id_lists only when numeric_ids <= 0 && !inc_recurse).
 func TestAtProto30UsesIDList(t *testing.T) {
 	for _, tt := range []struct {
 		version int
@@ -176,10 +177,11 @@ func TestAtProto30UsesIDList(t *testing.T) {
 		inc     bool
 		want    bool
 	}{
-		{version: 29, numeric: true, inc: false, want: true},
-		{version: 29, numeric: true, inc: true, want: true}, // inc unused < 30
+		{version: 29, numeric: false, inc: false, want: true},
+		{version: 29, numeric: true, inc: false, want: false},
+		{version: 29, numeric: true, inc: true, want: false}, // inc unused < 30
 		{version: 30, numeric: false, inc: false, want: true},
-		{version: 30, numeric: true, inc: false, want: true},
+		{version: 30, numeric: true, inc: false, want: false},
 		{version: 30, numeric: false, inc: true, want: false},
 		{version: 30, numeric: true, inc: true, want: false},
 		{version: 32, numeric: true, inc: true, want: false},

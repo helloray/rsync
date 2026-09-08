@@ -137,7 +137,15 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	var closeOnce sync.Once
 	closeOnErr := func(err error) error {
 		if err != nil {
-			closeOnce.Do(func() { c.Close() })
+			closeOnce.Do(func() {
+				// rsync/io.c:send_msg(MSG_ERROR_EXIT): tell the peer the
+				// transfer is aborting so it reports our error instead of
+				// hanging or dying on a bare EOF.
+				if serr := c.SendErrorExit(err.Error()); serr != nil {
+					rt.Logger.Printf("sending error-exit: %v", serr)
+				}
+				c.Close()
+			})
 		}
 		return err
 	}

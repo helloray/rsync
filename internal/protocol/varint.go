@@ -23,8 +23,6 @@ import (
 // Negative values are encoded as their two's complement uint32, so they
 // always occupy the full five-byte form.
 
-const varintMaxAllowed = uint32(0xFFFFFFFF)
-
 // WriteVarint writes v to w using rsync's variable-length integer encoding.
 func WriteVarint(w io.Writer, v int32) error {
 	u := uint64(uint32(v))

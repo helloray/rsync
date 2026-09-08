@@ -11,8 +11,8 @@ import (
 
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/protocol"
+	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
-	"github.com/mmcloughlin/md4"
 )
 
 // rsync/receiver.c:recv_files
@@ -246,13 +246,13 @@ func (rt *Transfer) receiveData(f *File, localFile *os.File) error {
 		}
 	}()
 
-	// The whole-file checksum mirrors C's sum_init (checksum.c): at protocol < 30
-	// the negotiated/implicit "md4" is CSUM_MD4_OLD, which folds the checksum
-	// seed (4 bytes) into the digest; at protocol >= 30 the negotiated modern
-	// CSUM_MD4 does NOT. The seed feed must be gated on the protocol version so
-	// the sender, receiver and C counterpart all compute the same digest.
-	h := md4.New()
-	if rt.ProtocolVersion() < 30 {
+	// The whole-file checksum mirrors C's sum_init (checksum.c): md5 is a
+	// plain digest at every version; md4 folds the checksum seed (4 bytes)
+	// into the digest only at protocol < 30 (CSUM_MD4_OLD), never at >= 30
+	// (modern CSUM_MD4). The seed feed must be gated so the sender, receiver
+	// and C counterpart all compute the same digest.
+	h := rsyncchecksum.NewStrong(rt.checksumAlgo())
+	if algo := rt.checksumAlgo(); algo == "md4" && rt.ProtocolVersion() < 30 {
 		binary.Write(h, binary.LittleEndian, rt.Seed)
 	}
 

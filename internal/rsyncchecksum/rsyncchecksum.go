@@ -1,7 +1,9 @@
 package rsyncchecksum
 
 import (
+	"crypto/md5"
 	"encoding/binary"
+	"hash"
 	"io"
 	"os"
 
@@ -50,28 +52,74 @@ func Checksum1(buf []byte) uint32 {
 	return (s1 & 0xffff) + (s2 << 16)
 }
 
-func Checksum2(seed int32, buf []byte) []byte {
+// NewStrong returns the accumulator for the negotiated strong-checksum
+// algorithm name ("md5" or "md4") for whole-file digests (C's sum_init /
+// file_checksum, checksum.c): plain digest over the data, no seed.
+func NewStrong(algo string) hash.Hash {
+	if algo == "md5" {
+		return md5.New()
+	}
+	return md4.New()
+}
+
+// seedBytes encodes the checksum seed the way C feeds it into md4/md5 digests
+// (4 little-endian bytes); C skips the seed entirely when it is zero
+// (checksum.c: if (checksum_seed)).
+func seedBytes(seed int32) []byte {
+	if seed == 0 {
+		return nil
+	}
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(seed))
+	return b[:]
+}
+
+// Checksum2 computes the per-block strong checksum the receiver sends back to
+// the sender (C's get_checksum2, checksum.c:322). md4 folds the seed in after
+// the data; md5 appends it after the data, or prepends it when the peer
+// negotiated the seed-order fix (CF_CHKSUM_SEED_FIX, proper_seed_order).
+func Checksum2(algo string, properSeedOrder bool, seed int32, buf []byte) []byte {
+	sb := seedBytes(seed)
+	if algo == "md5" {
+		h := md5.New()
+		if properSeedOrder {
+			if sb != nil {
+				h.Write(sb)
+			}
+			h.Write(buf)
+		} else {
+			h.Write(buf)
+			if sb != nil {
+				h.Write(sb)
+			}
+		}
+		return h.Sum(nil)
+	}
 	h := md4.New()
 	h.Write(buf)
-	binary.Write(h, binary.LittleEndian, seed)
+	if sb != nil {
+		h.Write(sb)
+	}
 	return h.Sum(nil)
 }
 
-func ReaderChecksum(r io.Reader) ([]byte, error) {
-	h := md4.New()
+func ReaderChecksum(algo string, r io.Reader) ([]byte, error) {
+	h := NewStrong(algo)
 	if _, err := io.Copy(h, r); err != nil {
 		return nil, err
 	}
 	return h.Sum(nil), nil
 }
 
-func RootChecksum(root *os.Root, fn string) ([]byte, error) {
+func RootChecksum(algo string, root *os.Root, fn string) ([]byte, error) {
 	f, err := root.Open(fn)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return ReaderChecksum(f)
+	return ReaderChecksum(algo, f)
 }
 
+// Size is the digest length of both supported strong checksums (md4 and md5
+// are both 16 bytes, like C's MAX_DIGEST_LEN for these algorithms).
 const Size = md4.Size

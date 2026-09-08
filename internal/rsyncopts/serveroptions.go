@@ -1,6 +1,10 @@
 package rsyncopts
 
-import "github.com/gokrazy/rsync/internal/protocol"
+import (
+	"strconv"
+
+	"github.com/gokrazy/rsync/internal/protocol"
+)
 
 func (o *Options) CommandOptions(path string, paths ...string) []string {
 	return append(o.ServerOptions(), append([]string{".", path}, paths...)...)
@@ -165,11 +169,12 @@ func (o *Options) ServerOptions() []string {
 	// 	args[ac++] = arg;
 	// }
 
-	// if (io_timeout) {
-	// 	if (asprintf(&arg, "--timeout=%d", io_timeout) < 0)
-	// 		goto oom;
-	// 	args[ac++] = arg;
-	// }
+	// rsync/options.c:server_options:168: forward the I/O timeout so the
+	// server also aborts idle transfers (a daemon additionally announces it
+	// via MSG_IO_TIMEOUT at protocol >= 31).
+	if o.IOTimeout() > 0 {
+		sargv = append(sargv, "--timeout="+strconv.Itoa(o.IOTimeout()))
+	}
 
 	// if (bwlimit) {
 	// 	if (asprintf(&arg, "--bwlimit=%d", bwlimit) < 0)
@@ -243,8 +248,11 @@ func (o *Options) ServerOptions() []string {
 	// if (safe_symlinks)
 	// 	args[ac++] = "--safe-links";
 
-	// if (numeric_ids)
-	// 	args[ac++] = "--numeric-ids";
+	// rsync/options.c:server_options:3076: forward --numeric-ids so the
+	// receiving side also suppresses uid/gid name transmission.
+	if o.Sender() && o.NumericIds() {
+		sargv = append(sargv, "--numeric-ids")
+	}
 
 	// if (only_existing && am_sender)
 	// 	args[ac++] = "--existing";

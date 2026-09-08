@@ -71,7 +71,7 @@ func (rt *Transfer) skipFile(f *File, st os.FileInfo) (bool, error) {
 	}
 
 	if rt.Opts.AlwaysChecksum {
-		checksum, err := rsyncchecksum.RootChecksum(rt.DestRoot, f.Name)
+		checksum, err := rsyncchecksum.RootChecksum(rt.checksumAlgo(), rt.DestRoot, f.Name)
 		if err != nil {
 			return false, err
 		}
@@ -339,7 +339,7 @@ func (rt *Transfer) generateAndSendSums(in *os.File, fileLen int64) error {
 		}
 
 		sum1 := rsyncchecksum.Checksum1(b)
-		sum2 := rsyncchecksum.Checksum2(rt.Seed, b)
+		sum2 := rsyncchecksum.Checksum2(rt.checksumAlgo(), rt.properSeedOrder(), rt.Seed, b)
 		if err := rt.Conn.WriteInt32(int32(sum1)); err != nil {
 			return err
 		}

@@ -597,6 +597,14 @@ func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc 
 	}
 	c.Writer = cwr
 
+	// rsync/main.c:1304: a daemon announces its --timeout at protocol >= 31
+	// so the client can adopt it as a stricter cap of its own timeout.
+	if opts.IOTimeout() > 0 && version >= 31 {
+		if terr := c.SendIoTimeout(opts.IOTimeout()); terr != nil {
+			s.logger.Printf("sending io-timeout: %v", terr)
+		}
+	}
+
 	// At protocol >= 30 the client also multiplexes its writes to us, so wrap
 	// our read side in a MultiplexReader to demux them
 	// (rsync/io.c:io_setup_multiplexing).
@@ -683,6 +691,7 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 			IgnoreTimes:    opts.IgnoreTimes(),
 			AlwaysChecksum: opts.AlwaysChecksum(),
 			DoFsync:        opts.DoFsync(),
+			NumericIds:     opts.NumericIds(),
 
 			InfoGTE:  opts.InfoGTE,
 			DebugGTE: opts.DebugGTE,
@@ -823,9 +832,18 @@ func (s *Server) handleConnSender(module *Module, crd *rsyncwire.CountingReader,
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	// Close the listener on context cancel (unblocks Accept) and on any
+	// other exit path, so the ctx-waiting goroutine below cannot outlive
+	// Serve when Accept fails for an unrelated reason.
+	defer ln.Close()
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
-		<-ctx.Done()
-		ln.Close() // unblocks Accept()
+		select {
+		case <-ctx.Done():
+		case <-stop:
+		}
+		ln.Close()
 	}()
 
 	for {

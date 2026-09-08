@@ -31,6 +31,10 @@ type TransferOpts struct {
 	AlwaysChecksum    bool
 	DoFsync           bool
 
+	// NumericIds mirrors C's numeric_ids: the peer asked for numeric-only
+	// uid/gid transmission (no names inline or in trailing id lists).
+	NumericIds bool
+
 	InfoGTE  func(rsyncopts.InfoLevel, uint16) bool
 	DebugGTE func(rsyncopts.DebugLevel, uint16) bool
 
@@ -48,6 +52,21 @@ func (rt *Transfer) ProtocolVersion() int {
 		return 27
 	}
 	return rt.Opts.ProtocolVersion
+}
+
+// checksumAlgo returns the negotiated strong-checksum algorithm name,
+// defaulting to md4 for legacy sessions without a negotiated Session.
+func (rt *Transfer) checksumAlgo() string {
+	if rt.Session != nil && rt.Session.ChecksumAlgo != "" {
+		return rt.Session.ChecksumAlgo
+	}
+	return "md4"
+}
+
+// properSeedOrder reports whether the checksum seed-order fix was negotiated
+// (CF_CHKSUM_SEED_FIX): md5 block checksums feed the seed before the data.
+func (rt *Transfer) properSeedOrder() bool {
+	return rt.Session != nil && rt.Session.ProperSeedOrder
 }
 
 type Transfer struct {
