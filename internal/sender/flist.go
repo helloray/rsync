@@ -173,6 +173,29 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		return filepath.SkipDir
 	}
 
+	f, err := s.buildEntry(path, info)
+	if err != nil {
+		return err
+	}
+
+	s.fileList.Files = append(s.fileList.Files, f)
+
+	if info.Mode().IsDir() && !opts.Recurse() {
+		return filepath.SkipDir
+	}
+
+	return nil
+}
+
+// buildEntry constructs the wire entry for one walk-path, given its already
+// resolved stat info: wire-name computation (strip/prefix/TOP_DIR), exclusion
+// check, and the metadata fields (mode, uid/gid, rdev, link target,
+// --always-checksum). Mirrors rsync/flist.c:make_file + send_file_entry's
+// flag setup.
+func (s *scopedWalker) buildEntry(path string, info fs.FileInfo) (file, error) {
+	logger := s.st.Logger // for convenience
+	opts := s.st.Opts     // for convenience
+
 	// Only ever transmit long names, like openrsync
 	flags := byte(rsync.XMIT_LONG_NAME)
 
@@ -201,7 +224,7 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 	// st.logger.Printf("flags for %q: %v", name, flags)
 
 	if s.excl.matches(name) {
-		return filepath.SkipDir
+		return file{}, filepath.SkipDir
 	}
 
 	size := info.Size()
@@ -298,7 +321,7 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 	if opts.PreserveLinks() && info.Mode().Type()&os.ModeSymlink != 0 {
 		target, err := s.source.Readlink(path)
 		if err != nil {
-			return err // TODO
+			return f, err // TODO
 		}
 		f.LinkTarget = target
 	}
@@ -309,12 +332,12 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		if info.Mode().IsRegular() {
 			fh, err := s.source.Open(path)
 			if err != nil {
-				return err
+				return f, err
 			}
 			checksum, err = rsyncchecksum.ReaderChecksum(s.st.checksumAlgo(), fh)
 			fh.Close()
 			if err != nil {
-				return err
+				return f, err
 			}
 		} else {
 			// send empty md4 checksum
@@ -322,13 +345,7 @@ func (s *scopedWalker) walkFn(path string, d fs.DirEntry, err error) error {
 		copy(f.Checksum[:], checksum)
 	}
 
-	s.fileList.Files = append(s.fileList.Files, f)
-
-	if info.Mode().IsDir() && !opts.Recurse() {
-		return filepath.SkipDir
-	}
-
-	return nil
+	return f, nil
 }
 
 // rdevMajorMinor splits a device number into its major/minor parts,
