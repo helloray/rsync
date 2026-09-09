@@ -192,18 +192,18 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 				}
 			}
 		}
-		flatIdx := int(fileIndex)
+		var fl *file
 		if fileList.inc != nil {
 			// Under incremental recursion the ndx space follows the segment
-			// chain; map it back to the flat list and advance the receiver's
+			// chain; resolve it to the entry and advance the receiver's
 			// position to free lookahead budget. Indices below the current
 			// segment's ndx_start are legitimate: the generator itemizes a
 			// segment's parent dir with ndx_start-1 (rsync/generator.c:2787),
 			// and such itemizes never carry ITEM_TRANSFER, so no flat mapping
 			// is needed (rsync/sender.c:551-557 resolves them to the dir).
-			idx, ok := fileList.inc.advance(fileIndex)
+			f, ok := fileList.inc.advance(fileIndex)
 			if ok {
-				flatIdx = idx
+				fl = f
 			} else if iflags&rsync.ITEM_TRANSFER != 0 {
 				return fmt.Errorf("invalid file index %d under incremental recursion", fileIndex)
 			}
@@ -212,9 +212,12 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			if err := fileList.inc.topUp(); err != nil {
 				return err
 			}
-		} else if fileIndex < 0 || int(fileIndex) >= len(fileList.Files) {
-			return fmt.Errorf("invalid file index %d (list has %d entries)",
-				fileIndex, len(fileList.Files))
+		} else {
+			if fileIndex < 0 || int(fileIndex) >= len(fileList.Files) {
+				return fmt.Errorf("invalid file index %d (list has %d entries)",
+					fileIndex, len(fileList.Files))
+			}
+			fl = &fileList.Files[fileIndex]
 		}
 
 		// rsync/sender.c:send_files: echo itemize messages that do not
@@ -233,7 +236,6 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			continue
 		}
 
-		fl := fileList.Files[flatIdx]
 		st.Progress.Reset(uint64(fl.Length))
 
 		head, err := st.receiveSums()
@@ -273,9 +275,9 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 		st.lastMatch = 0
 		if len(head.Sums) == 0 {
 			// fast path: send the whole file
-			err = st.sendFile(fileIndex, fl)
+			err = st.sendFile(fileIndex, *fl)
 		} else {
-			err = st.hashSearch(targets, tagTable, head, fileIndex, fl)
+			err = st.hashSearch(targets, tagTable, head, fileIndex, *fl)
 		}
 		if err != nil {
 			if _, ok := err.(*os.PathError); ok {

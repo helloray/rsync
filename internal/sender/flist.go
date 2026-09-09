@@ -371,6 +371,9 @@ func (s *scopedWalker) buildEntry(path string, info fs.FileInfo) (file, error) {
 type dirLoc struct {
 	sw    *scopedWalker
 	dpath string
+	// wpath is the directory's wire path, matching the Wpath of the entry
+	// that discovered it; the scheduler keys dir nodes by it.
+	wpath string
 }
 
 // scanDir reads the directory at walk-path dpath and returns its immediate
@@ -430,7 +433,7 @@ func (s *scopedWalker) scanDir(dpath string) ([]file, []dirLoc, error) {
 	var dirs []dirLoc
 	for i := range out {
 		if out[i].isDir() && opts.Recurse() {
-			dirs = append(dirs, dirLoc{sw: s, dpath: out[i].path})
+			dirs = append(dirs, dirLoc{sw: s, dpath: out[i].path, wpath: out[i].Wpath})
 		}
 	}
 	return out, dirs, nil
@@ -476,7 +479,7 @@ func (s *scopedWalker) scanRoot() (initial []file, dirs []dirLoc, err error) {
 		return initial, kidDirs, nil
 	}
 	// non-dot root dir: its children form its own segment later
-	return initial, []dirLoc{{sw: s, dpath: rootname}}, nil
+	return initial, []dirLoc{{sw: s, dpath: rootname, wpath: root.Wpath}}, nil
 }
 
 // rdevMajorMinor splits a device number into its major/minor parts,
@@ -516,6 +519,14 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 		}
 		ioErrors = 1
 	}
+
+	// Under incremental recursion the full tree must not be pre-walked: each
+	// requested path contributes only its walk-root entry (plus, for the
+	// dot-dir, its immediate children); deeper dirs are scanned on demand by
+	// the segment scheduler (C's send1extra model, docs/sendextra.md).
+	incMode := st.Session != nil && st.Session.IncRecurse
+	var initial []file
+	var locs []dirLoc
 
 	for _, requested := range paths {
 		subdir := "."
@@ -563,13 +574,26 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 			subdir:    subdir,
 			prefix:    prefix,
 		}
+		if incMode {
+			ini, ds, err := sw.scanRoot()
+			if err != nil {
+				return nil, err
+			}
+			initial = append(initial, ini...)
+			locs = append(locs, ds...)
+			continue
+		}
 		if err := sw.walk(); err != nil {
 			return nil, err
 		}
 	}
 
 	if st.Opts.InfoGTE(rsyncopts.INFO_PROGRESS, 1) {
-		st.Logger.Printf("%d files to consider", len(fileList.Files))
+		files := len(fileList.Files)
+		if incMode {
+			files = len(initial)
+		}
+		st.Logger.Printf("%d files to consider", files)
 	}
 
 	// rsync/flist.c:send_file_list calls flist_sort_and_clean() before
@@ -578,10 +602,31 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 	// sort identically, so the file indices stay aligned. Mirror that
 	// order here.
 	if !protocol.UsesOldPrefixes(st.Opts.ProtocolVersion()) {
-		sort.Slice(fileList.Files, func(i, j int) bool {
-			a, b := &fileList.Files[i], &fileList.Files[j]
+		files := fileList.Files
+		if incMode {
+			files = initial
+		}
+		sort.Slice(files, func(i, j int) bool {
+			a, b := &files[i], &files[j]
 			return protocol.FNameCmp(a.Wpath, a.isDir(), b.Wpath, b.isDir()) < 0
 		})
+	}
+
+	p := st.flistParams()
+
+	if incMode {
+		// incremental recursion: send only the initial list now; the per-dir
+		// segments follow lazily from the SendFiles loop. Under this mode
+		// fileList.Files stays empty so consumed segments can free their
+		// entries for real (docs/sendextra.md).
+		enc := flist.NewEncoder(p)
+		roots := buildIncNodes(st, initial, locs)
+		inc := newIncSched(st, enc, initial, &ioErrors, uidMap, gidMap, roots)
+		if err := inc.emitInitial(); err != nil {
+			return nil, err
+		}
+		fileList.inc = inc
+		return &fileList, nil
 	}
 
 	// Encode every entry plus the terminator, trailing uid/gid id lists and the
@@ -589,7 +634,6 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 	// _c-rsync/flist.c:send_file_list + uidlist.c:send_id_lists. The encoder
 	// owns the cross-entry compression state (SAME_NAME prefix, SAME_UID/GID,
 	// rdev major) so no per-entry scratch is needed here.
-	p := st.flistParams()
 	entries := make([]*flist.FileEntry, len(fileList.Files))
 	for i := range fileList.Files {
 		f := &fileList.Files[i]
@@ -613,19 +657,6 @@ func (st *Transfer) SendFileList(localDir string, paths []string, excl *filterRu
 		}
 		copy(fe.Checksum[:], f.Checksum[:])
 		entries[i] = fe
-	}
-
-	if p.IncRecurse {
-		// incremental recursion: send the initial list now; the per-dir
-		// segments follow lazily from the SendFiles loop.
-		enc := flist.NewEncoder(p)
-		inc := newIncSched(st, enc, entries, ioErrors)
-		if err := inc.emit(0); err != nil {
-			return nil, err
-		}
-		inc.sentUpTo = 1 // segment 0 is on the wire; topUp starts at segment 1
-		fileList.inc = inc
-		return &fileList, nil
 	}
 
 	fec.Reset()
