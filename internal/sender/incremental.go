@@ -223,7 +223,13 @@ func (s *incSched) advance(ndx int32) (int, bool) {
 // caller must not double-echo.
 func (s *incSched) releaseDone() (freed, more bool) {
 	if s.freedUpTo < s.sentUpTo {
-		s.fileOldTotal -= len(s.segs[s.freedUpTo].idxs)
+		// rsync/flist.c:3301: freeing a list removes its entries from
+		// file_total too, so the lookahead backlog (file_total -
+		// file_old_total) keeps counting only the entries ahead of the
+		// receiver's current position.
+		n := len(s.segs[s.freedUpTo].idxs)
+		s.fileTotal -= n
+		s.fileOldTotal -= n
 		s.freedUpTo++
 		return true, s.freedUpTo < s.sentUpTo
 	}
