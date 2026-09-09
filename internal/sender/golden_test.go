@@ -40,11 +40,53 @@ func (nopWriteCloser) Close() error                { return nil }
 // protocol-32 session flags a Go↔C transfer negotiates.
 func newGoldenTransfer(t *testing.T, mapfs fstest.MapFS) (*Transfer, *bytes.Buffer) {
 	t.Helper()
+	return newGoldenTransferArgs(t, mapfs)
+}
+
+// newGoldenTransferNoRecurse is newGoldenTransfer without the -r flag letter,
+// for exercising non-recursive scan behavior.
+func newGoldenTransferNoRecurse(t *testing.T, mapfs fstest.MapFS) (*Transfer, *bytes.Buffer) {
+	t.Helper()
 
 	osenv := &rsyncos.Env{Stderr: nopWriteCloser{}}
 	opts := rsyncopts.NewOptions(osenv)
 	pc := rsyncopts.NewContext(opts)
-	if err := pc.ParseArguments(osenv, []string{"--server", "--sender", "-logDtpre.iLsfxCIvu", "."}); err != nil {
+	if err := pc.ParseArguments(osenv, []string{"--server", "--sender", "-logDtpe.iLsfxCIvu", "."}); err != nil {
+		t.Fatalf("parsing server options: %v", err)
+	}
+	opts.SetProtocolVersion(32)
+
+	buf := &memWriteCloser{}
+	conn := &rsyncwire.Conn{
+		Writer: &rsyncwire.MultiplexWriter{Writer: buf},
+	}
+	st := &Transfer{
+		Logger: log.New(testlogger.New(t)),
+		Opts:   opts,
+		Session: &protocol.Session{
+			Version:          32,
+			IncRecurse:       true,
+			VarintFlistFlags: true,
+			SafeFlist:        true,
+		},
+		Conn:   conn,
+		Source: NewFSSource(mapfs),
+		Env:    osenv,
+	}
+	return st, &buf.Buffer
+}
+
+// newGoldenTransferArgs is newGoldenTransfer with additional command-line
+// arguments appended to the server option string.
+func newGoldenTransferArgs(t *testing.T, mapfs fstest.MapFS, extraArgs ...string) (*Transfer, *bytes.Buffer) {
+	t.Helper()
+
+	osenv := &rsyncos.Env{Stderr: nopWriteCloser{}}
+	opts := rsyncopts.NewOptions(osenv)
+	pc := rsyncopts.NewContext(opts)
+	args := append([]string{"--server", "--sender", "-logDtpre.iLsfxCIvu"}, extraArgs...)
+	args = append(args, ".")
+	if err := pc.ParseArguments(osenv, args); err != nil {
 		t.Fatalf("parsing server options: %v", err)
 	}
 	opts.SetProtocolVersion(32)

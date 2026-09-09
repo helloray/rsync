@@ -2,6 +2,7 @@ package sender
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -109,7 +110,10 @@ type scopedWalker struct {
 	prefix    string
 }
 
-func (s *scopedWalker) walk() error {
+// resolveSource sets up the FileSource for this walker: either the Transfer's
+// module source, or an *os.Root (single file) over localDir, wrapped in a
+// subSource when the request targets a subdirectory.
+func (s *scopedWalker) resolveSource() error {
 	if s.source == nil {
 		fi, err := os.Lstat(s.localDir)
 		if err != nil {
@@ -136,14 +140,26 @@ func (s *scopedWalker) walk() error {
 		}
 		s.source = sub
 	}
+	return nil
+}
 
+// rootName returns the walk-root path of this walker within its source's
+// file system: the requested path, made relative for fs.WalkDir/fs.ReadDir.
+func (s *scopedWalker) rootName() string {
 	rootname := s.requested
 	// fs.WalkDir(root.FS(), …) does not accept absolute paths,
 	// so make them relative by prepending a .
 	if strings.HasPrefix(rootname, "/") {
 		rootname = "." + rootname
 	}
-	if err := fs.WalkDir(s.source.FS(), path.Clean(rootname), s.walkFn); err != nil {
+	return path.Clean(rootname)
+}
+
+func (s *scopedWalker) walk() error {
+	if err := s.resolveSource(); err != nil {
+		return err
+	}
+	if err := fs.WalkDir(s.source.FS(), s.rootName(), s.walkFn); err != nil {
 		return err
 	}
 	return nil
@@ -346,6 +362,121 @@ func (s *scopedWalker) buildEntry(path string, info fs.FileInfo) (file, error) {
 	}
 
 	return f, nil
+}
+
+// dirLoc identifies one directory to be scanned later by the lazy
+// incremental-recursion scheduler (C's dir_flist entry): the walker context
+// that discovered it — owning the exclusion rules and the strip/prefix
+// wire-name mapping — plus its walk-path within that walker's source.
+type dirLoc struct {
+	sw    *scopedWalker
+	dpath string
+}
+
+// scanDir reads the directory at walk-path dpath and returns its immediate
+// children as wire entries, sorted with FNameCmp — the per-segment sort of
+// C's send_extra_file_list (rsync/flist.c:send_directory +
+// flist_sort_and_clean). Because every child shares the same parent, the
+// per-segment sort equals the global sort restricted to this segment, so the
+// wire order matches the pre-refactor implementation. It also returns the
+// walk-paths of child directories for the scheduler's dir tree.
+//
+// Stat failures and exclusions skip individual entries (mirroring walkFn's
+// io-error flag and SkipDir), while encode-path errors (readlink,
+// --always-checksum) abort the scan, like they abort the walk.
+func (s *scopedWalker) scanDir(dpath string) ([]file, []dirLoc, error) {
+	opts := s.st.Opts
+	if opts.DebugGTE(rsyncopts.DEBUG_FLIST, 1) {
+		s.st.Logger.Printf("scanDir(path=%s)", dpath)
+	}
+	des, err := fs.ReadDir(s.source.FS(), dpath)
+	if err != nil {
+		// set the I/O error flag, but keep going
+		s.ioError(err)
+		return nil, nil, nil
+	}
+	out := make([]file, 0, len(des))
+	for _, de := range des {
+		info, err := de.Info()
+		if err != nil {
+			s.ioError(err)
+			continue
+		}
+		if info.Mode().IsDir() && opts.XferDirs() == 0 {
+			s.st.Logger.Printf("skipping directory %s/%s", dpath, de.Name())
+			continue
+		}
+		childPath := de.Name()
+		if dpath != "." {
+			childPath = dpath + "/" + de.Name()
+		}
+		f, err := s.buildEntry(childPath, info)
+		if err != nil {
+			if errors.Is(err, fs.SkipDir) {
+				// excluded: the entry and its subtree are skipped
+				continue
+			}
+			return nil, nil, err
+		}
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := &out[i], &out[j]
+		return protocol.FNameCmp(a.Wpath, a.isDir(), b.Wpath, b.isDir()) < 0
+	})
+	// child dir walk-paths, in the sorted entry order so child dir indices
+	// follow the wire order (C's add_dirs_to_tree appends from the sorted
+	// segment)
+	var dirs []dirLoc
+	for i := range out {
+		if out[i].isDir() && opts.Recurse() {
+			dirs = append(dirs, dirLoc{sw: s, dpath: out[i].path})
+		}
+	}
+	return out, dirs, nil
+}
+
+// scanRoot returns the walk-root entry of one requested path plus, when the
+// root is the dot-dir (wire name "."), its immediate children — matching
+// C's send_directory at flist.c:2756-2763, which folds the root directory's
+// contents into the first flist. For a non-dot root dir, the returned dirLoc
+// names the root itself: its children will be scanned when its segment is
+// emitted, exactly like today's per-parent bucketing of slash-containing
+// names in newIncSched.
+func (s *scopedWalker) scanRoot() (initial []file, dirs []dirLoc, err error) {
+	if err := s.resolveSource(); err != nil {
+		return nil, nil, err
+	}
+	rootname := s.rootName()
+	info, err := fs.Stat(s.source.FS(), rootname)
+	if err != nil {
+		// set the I/O error flag, but keep going (walkFn behavior)
+		s.ioError(err)
+		return nil, nil, nil
+	}
+	root, err := s.buildEntry(rootname, info)
+	if err != nil {
+		if errors.Is(err, fs.SkipDir) {
+			// the whole transfer scope is excluded
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	initial = append(initial, root)
+	if !root.isDir() || !s.st.Opts.Recurse() {
+		return initial, nil, nil
+	}
+	if root.Wpath == "." {
+		// dot-dir: the children ride the initial list
+		kids, kidDirs, err := s.scanDir(rootname)
+		if err != nil {
+			return nil, nil, err
+		}
+		initial = append(initial, kids...)
+		return initial, kidDirs, nil
+	}
+	// non-dot root dir: its children form its own segment later
+	return initial, []dirLoc{{sw: s, dpath: rootname}}, nil
 }
 
 // rdevMajorMinor splits a device number into its major/minor parts,
