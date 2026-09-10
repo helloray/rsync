@@ -17,7 +17,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -711,7 +710,7 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 	if err := os.MkdirAll(rt.Dest, 0755); err != nil {
 		return fmt.Errorf("MkdirAll(dest=%s): %v", rt.Dest, err)
 	}
-	rt.DestRoot, err = os.OpenRoot(rt.Dest)
+	rt.DestRoot, err = receiver.NewSafeRoot(rt.Dest)
 	if err != nil {
 		return fmt.Errorf("OpenRoot(dest=%s): %v", rt.Dest, err)
 	}
@@ -740,14 +739,10 @@ func (s *Server) handleConnReceiver(module *Module, crd *rsyncwire.CountingReade
 					return fmt.Errorf("OpenRoot(%s): %v", subdir, err)
 				}
 			}
-			if name := subRoot.Name(); filepath.IsAbs(name) {
-				rt.Dest = name
-			} else {
-				// Go changed behavior: In Go 1.25, subRoot.Name()
-				// did not return an absolute path:
-				// https://go.googlesource.com/go/+/ed7f804
-				rt.Dest = filepath.Join(rt.Dest, name)
-			}
+			// SafeRoot tracks the absolute destination path itself,
+			// independent of (*os.Root).Name()'s relative-name behavior
+			// (which changed between Go 1.25 and 1.26).
+			rt.Dest = subRoot.Path()
 			rt.DestRoot = subRoot
 			if opts.Verbose() {
 				s.logger.Printf("opened subdirectory %q", rt.Dest)

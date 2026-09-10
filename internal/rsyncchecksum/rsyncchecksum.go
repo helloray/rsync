@@ -111,7 +111,7 @@ func ReaderChecksum(algo string, r io.Reader) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-func RootChecksum(algo string, root *os.Root, fn string) ([]byte, error) {
+func RootChecksum(algo string, root interface{ Open(name string) (*os.File, error) }, fn string) ([]byte, error) {
 	f, err := root.Open(fn)
 	if err != nil {
 		return nil, err

@@ -11,7 +11,7 @@ import (
 // handle. It is similar to os.CreateTemp except that the directory must be
 // given, the file permissions can be controlled and patterns in the name are
 // not supported.  The name is always suffixed with a random number.
-func openTempFileRoot(root *os.Root, name string, perm os.FileMode) (string, *os.File, error) {
+func openTempFileRoot(root *SafeRoot, name string, perm os.FileMode) (string, *os.File, error) {
 	prefix := name
 
 	for attempt := 0; ; {
@@ -35,14 +35,14 @@ func openTempFileRoot(root *os.Root, name string, perm os.FileMode) (string, *os
 }
 
 type pendingFile struct {
-	root    *os.Root
+	root    *SafeRoot
 	tmpname string
 	fn      string
 	f       *os.File
 	sync    bool
 }
 
-func newPendingFile(root *os.Root, fn string, sync bool) (*pendingFile, error) {
+func newPendingFile(root *SafeRoot, fn string, sync bool) (*pendingFile, error) {
 	tmpname, f, err := openTempFileRoot(root, "."+filepath.Base(fn), 0o600)
 	if err != nil {
 		return nil, err

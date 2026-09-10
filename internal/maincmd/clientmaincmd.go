@@ -435,7 +435,7 @@ func ClientRun(osenv *rsyncos.Env, opts *rsyncopts.Options, conn io.ReadWriteClo
 		if err := os.MkdirAll(rt.Dest, 0755); err != nil {
 			return nil, fmt.Errorf("MkdirAll(dest=%s): %v", rt.Dest, err)
 		}
-		rt.DestRoot, err = os.OpenRoot(rt.Dest)
+		rt.DestRoot, err = receiver.NewSafeRoot(rt.Dest)
 		if err != nil {
 			return nil, fmt.Errorf("OpenRoot(dest=%s): %v", rt.Dest, err)
 		}

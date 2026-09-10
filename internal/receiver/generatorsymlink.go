@@ -8,6 +8,6 @@ import (
 	"github.com/google/renameio/v2"
 )
 
-func symlink(root *os.Root, oldname, newname string) error {
-	return renameio.SymlinkRoot(root, oldname, newname)
+func symlink(root *SafeRoot, oldname, newname string) error {
+	return renameio.SymlinkRoot(root.Root, oldname, newname)
 }

@@ -11,7 +11,7 @@ import (
 
 func newTestTransfer(t *testing.T, dest string) *Transfer {
 	t.Helper()
-	root, err := os.OpenRoot(dest)
+	root, err := NewSafeRoot(dest)
 	if err != nil {
 		t.Fatal(err)
 	}
