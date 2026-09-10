@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -102,6 +103,11 @@ func (st *Transfer) Do(crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWri
 		if serr := st.Conn.SendErrorExit(rsyncwire.RERRPartial); serr != nil {
 			st.Logger.Printf("sending error-exit: %v", serr)
 		}
+		// SendFiles is the only reader at this point, so drain the peer's
+		// in-flight data before returning: a close with unread data sends a
+		// RST that discards the frames just sent on the peer side (see
+		// GracefulAbortClose). The caller closes an already-drained socket.
+		st.Conn.GracefulAbortClose(5 * time.Second)
 		return nil, err
 	}
 

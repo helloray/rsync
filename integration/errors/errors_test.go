@@ -201,3 +201,65 @@ func TestReceiverErrorSurfacedToClient(t *testing.T) {
 		t.Fatalf("output unexpectedly contains %q — MSG_ERROR_EXIT framing regressed:\n%s", got, output)
 	}
 }
+
+// TestReceiverErrorSurfacedWithInFlightData pins the abort-path shutdown: the
+// receiver aborts while the C sender is still streaming a large file, so the
+// error frames race in-flight data. Closing the socket while the peer has
+// unread data sends a RST that discards the frames, and the client only sees
+// "connection reset by peer" instead of the abort reason. The large file is
+// ordered before the colliding name (f_name_cmp) so the generator hits the
+// error mid-stream.
+func TestReceiverErrorSurfacedWithInFlightData(t *testing.T) {
+	if testing.Short() {
+		t.Skip("transfers 16 MB to reproduce in-flight data at abort time")
+	}
+	t.Parallel()
+
+	tmp := t.TempDir()
+	source := filepath.Join(tmp, "source")
+	if err := os.MkdirAll(source, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "aaa"), bytes.Repeat([]byte("a"), 16<<20), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "sub"), []byte("file contents"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	modRoot := filepath.Join(tmp, "modroot")
+	if err := os.MkdirAll(filepath.Join(modRoot, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modRoot, "sub", "blocked.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := rsynctest.New(t, rsynctest.WritableInteropModule(modRoot))
+
+	var buf bytes.Buffer
+	rsync := exec.Command(rsynctest.AnyRsync(t),
+		"--archive",
+		"--port="+srv.Port,
+		"source/", "rsync://localhost/interop/")
+	rsync.Dir = tmp
+	rsync.Stdout = &buf
+	rsync.Stderr = &buf
+	err := rsync.Run()
+	if err == nil {
+		t.Fatalf("rsync unexpectedly succeeded, output:\n%s", buf.String())
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
+		t.Fatalf("rsync exit = %v, want exit code 23 (RERR_PARTIAL): %v", err, err)
+	}
+
+	output := buf.String()
+	t.Logf("output:\n%s\n(end of output)", output)
+	if want := "make room for regular file"; !strings.Contains(output, want) {
+		t.Fatalf("output unexpectedly did not contain the receiver error %q:\n%s", want, output)
+	}
+	if got := "connection reset"; strings.Contains(strings.ToLower(output), got) {
+		t.Fatalf("output unexpectedly contains %q — abort path closes the socket with in-flight data:\n%s", got, output)
+	}
+}

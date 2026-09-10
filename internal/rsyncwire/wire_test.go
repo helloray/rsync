@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gokrazy/rsync/internal/rsyncos"
 )
@@ -165,5 +167,112 @@ func TestMultiplexReadErrorExit(t *testing.T) {
 				t.Fatalf("Read err = %v, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// blockingReadCloser simulates a peer that keeps the connection open: Read
+// blocks until Close is called (like a net.Conn read unblocked by a
+// concurrent Close), then reports EOF.
+type blockingReadCloser struct {
+	unblock chan struct{}
+	closeFn sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{unblock: make(chan struct{})}
+}
+
+func (b *blockingReadCloser) Read(p []byte) (int, error) {
+	<-b.unblock
+	return 0, io.EOF
+}
+
+func (b *blockingReadCloser) Close() error {
+	b.closeFn.Do(func() { close(b.unblock) })
+	return nil
+}
+
+// eofReadCloser returns the given data once and then EOF, remembering
+// whether Close was called.
+type eofReadCloser struct {
+	data   []byte
+	off    int
+	closed bool
+}
+
+func (e *eofReadCloser) Read(p []byte) (int, error) {
+	if e.off < len(e.data) {
+		n := copy(p, e.data[e.off:])
+		e.off += n
+		return n, nil
+	}
+	return 0, io.EOF
+}
+
+func (e *eofReadCloser) Close() error { e.closed = true; return nil }
+
+// nopCloserWC records Close calls on the write side.
+type recordingWC struct {
+	io.Writer
+	closed bool
+}
+
+func (r *recordingWC) Close() error { r.closed = true; return nil }
+
+func TestGracefulAbortCloseDrainsThenCloses(t *testing.T) {
+	var stream bytes.Buffer
+	rwc := &recordingWC{Writer: &stream}
+	rd := &eofReadCloser{data: []byte("in-flight peer data")}
+	conn := &Conn{Writer: rwc, Reader: rd}
+
+	start := time.Now()
+	conn.GracefulAbortClose(5 * time.Second)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("GracefulAbortClose took %v with an EOF peer, want immediate return", elapsed)
+	}
+	if !rd.closed || !rwc.closed {
+		t.Fatalf("GracefulAbortClose did not close both directions (reader closed=%v, writer closed=%v)", rd.closed, rwc.closed)
+	}
+	if stream.Len() != 0 {
+		// Nothing was ever written through the writer; this only guards that
+		// Close ran on it.
+		t.Fatalf("unexpected bytes written: %q", stream.String())
+	}
+}
+
+func TestGracefulAbortCloseWatchdog(t *testing.T) {
+	rd := newBlockingReadCloser()
+	conn := &Conn{Writer: nopWriteCloser{io.Discard}, Reader: rd}
+
+	start := time.Now()
+	// Drain timeout far below the go test default panic timeout: a hang would
+	// fail the whole run, this returns within ~100ms.
+	conn.GracefulAbortClose(100 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("GracefulAbortClose took %v against a stuck peer, want the watchdog to fire", elapsed)
+	}
+	select {
+	case <-rd.unblock:
+		// Close unblocked the reader, as intended.
+	default:
+		t.Fatalf("watchdog did not close the connection")
+	}
+}
+
+func TestGracefulAbortCloseDrainsAllData(t *testing.T) {
+	// A peer that sends a burst of data and then closes: the drain must
+	// consume everything (discarded) and end on the peer's EOF, not the
+	// watchdog.
+	var stream bytes.Buffer
+	payload := bytes.Repeat([]byte("x"), 128*1024)
+	rd := &eofReadCloser{data: payload}
+	conn := &Conn{Writer: nopWriteCloser{&stream}, Reader: rd}
+
+	conn.GracefulAbortClose(5 * time.Second)
+	if !rd.closed {
+		t.Fatalf("connection was not closed after the peer EOFed")
+	}
+	if rd.off != len(rd.data) {
+		t.Fatalf("drain read %d of %d bytes", rd.off, len(rd.data))
 	}
 }

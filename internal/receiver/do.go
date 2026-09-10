@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
@@ -150,7 +151,11 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 				if serr := c.SendErrorExit(rsyncwire.RERRPartial); serr != nil {
 					rt.Logger.Printf("sending error-exit: %v", serr)
 				}
-				c.Close()
+				// Deliberately no Close here: the other goroutines still
+				// read the connection, and closing while the peer still has
+				// file data in flight sends a RST that discards the peer's
+				// received-but-unread data — including the frames just sent.
+				// The drain-and-close after eg.Wait() handles the shutdown.
 			})
 		}
 		return err
@@ -164,6 +169,11 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	eg.Go(func() error { return closeOnErr(rt.GenerateFiles(fileList)) })
 	eg.Go(func() error { return closeOnErr(rt.RecvFiles(fileList)) })
 	if err := eg.Wait(); err != nil {
+		// All goroutines are done, so nobody else reads the connection: the
+		// peer exits once it processes the abort frames, and draining its
+		// remaining in-flight data lets the final Close produce a FIN (a RST
+		// would discard the frames on the peer side, see GracefulAbortClose).
+		c.GracefulAbortClose(5 * time.Second)
 		return nil, err
 	}
 	if rt.inc != nil {

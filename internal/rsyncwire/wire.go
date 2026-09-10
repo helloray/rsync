@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/gokrazy/rsync/internal/rsyncos"
 )
@@ -231,6 +232,42 @@ func (c *Conn) Close() error {
 		return wcErr
 	}
 	return rcErr
+}
+
+// GracefulAbortClose drains the connection before closing it, for use on an
+// abort path that has just sent MSG_ERROR/MSG_ERROR_EXIT frames. Closing a
+// socket while the peer still has data in flight sends a RST, and a RST
+// discards the peer's received-but-unread data — erasing the frames just sent,
+// so the peer only sees "connection reset by peer" instead of the abort
+// reason. (C rsync keeps its reader alive for the same reason via
+// rsync/io.c:noop_io_until_death after cleanup.c sends MSG_ERROR_EXIT.)
+//
+// Reads are discarded until the peer closes its end (EOF) or drain elapses,
+// whichever comes first; the watchdog Close unblocks a reader stuck on a peer
+// that never finishes. Must not be called while another goroutine is still
+// reading from the connection.
+func (c *Conn) GracefulAbortClose(drain time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 32*1024)
+		for {
+			if _, err := c.Reader.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	timer := time.NewTimer(drain)
+	defer timer.Stop()
+	select {
+	case <-done:
+		c.Close()
+	case <-timer.C:
+		// The peer never finished: close to unblock the drain goroutine,
+		// then wait for it to exit before returning.
+		c.Close()
+		<-done
+	}
 }
 
 // msgWriter is implemented by writers that can carry multiplex control
