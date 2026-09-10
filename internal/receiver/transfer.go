@@ -81,6 +81,11 @@ type Transfer struct {
 	// and per-file message framing.
 	Session *protocol.Session
 
+	// skipCount tracks entries skipped as unrepresentable (e.g. NTFS cannot
+	// store "Convert::Binary::C.3pm"); written atomically from the generator,
+	// read by Do after both goroutines finish.
+	skipCount int32
+
 	// Ndx codecs, one per wire direction. The modern (protocol >= 30) NDX
 	// encoding is delta-encoded and stateful, so a single codec must be reused
 	// for its direction across the whole transfer. The writer codec is used

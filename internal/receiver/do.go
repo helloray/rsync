@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gokrazy/rsync/internal/protocol"
@@ -192,6 +193,22 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// rsync/cleanup.c:exit_cleanup: a receiver with per-entry IO errors ends
+	// the session with MSG_ERROR_EXIT(RERR 23, "some files/attrs were not
+	// transferred") BEFORE the goodbye exchange — the peer is still reading
+	// here and _exit_cleanup()s on the spot, so a later error-exit would
+	// never be seen. The peer is gone after this, so the goodbye exchange
+	// is skipped.
+	if n := atomic.LoadInt32(&rt.skipCount); n > 0 {
+		if err := c.SendError(fmt.Sprintf("%d files were skipped (names not representable on this filesystem, see the server log)", n)); err != nil {
+			return nil, err
+		}
+		if err := c.SendErrorExit(rsyncwire.RERRPartial); err != nil {
+			return nil, err
+		}
+		return stats, nil
 	}
 
 	// send final goodbye message

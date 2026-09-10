@@ -55,6 +55,26 @@ func (r *SafeRoot) fallbackRoot(name string) (*os.Root, string, bool) {
 	return sub, filepath.Join(r.absRoot, filepath.FromSlash(name)), true
 }
 
+// unrepresentable reports whether name cannot exist as an ordinary file or
+// directory on Windows: any component containing a character NTFS forbids.
+// Colons are the field case (Perl man pages like "Convert::Binary::C.3pm"):
+// os.Root rejects them outright, and even \\?\ paths cannot create them
+// because NTFS treats ":" as a stream separator. C rsync cannot transfer
+// these names on Windows either — the receiver skips them and counts an
+// IO error.
+func unrepresentable(name string) bool {
+	for _, part := range strings.Split(filepath.FromSlash(name), string(filepath.Separator)) {
+		switch part {
+		case "", ".", "..":
+			continue
+		}
+		if strings.ContainsAny(part, `<>:"|?*`) || strings.IndexFunc(part, func(r rune) bool { return r < 0x20 }) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // reservedDeviceName reports whether part is a DOS device name up to its
 // first extension dot (the mirror of Go's internal filepathlite check that
 // makes os.Root reject such paths).

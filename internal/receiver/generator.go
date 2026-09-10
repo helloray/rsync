@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -138,6 +139,16 @@ func (rt *Transfer) recvGenerator(f *File) error {
 			float64(f.Length), // TODO: rsync prints decimal separators
 			f.ModTime.Format("2006/01/02 15:04:05"),
 			f.Name)
+		return nil
+	}
+	if unrepresentable(f.Name) {
+		// C rsync on Windows fails on these names the same way (NTFS cannot
+		// represent them); skip the entry, count the IO error and let the
+		// rest of the transfer proceed (exit 23 at the end, per-file error
+		// instead of aborting the whole session).
+		rt.Logger.Printf("skipping %s: name not representable on this filesystem", f.Name)
+		atomic.OrInt32(&rt.IOErrors, 1)
+		atomic.AddInt32(&rt.skipCount, 1)
 		return nil
 	}
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_GENR, 1) {

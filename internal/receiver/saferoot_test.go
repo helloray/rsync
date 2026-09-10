@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gokrazy/rsync/internal/log"
+	"github.com/gokrazy/rsync/internal/rsyncopts"
 )
 
 // TestSafeRootReservedDeviceNames checks that Windows reserved device names
@@ -95,5 +98,44 @@ func TestSafeRootReservedDeviceNames(t *testing.T) {
 	// ".." must still be rejected by os.Root.
 	if _, err := root.Open("../outside"); err == nil {
 		t.Error("Open(../outside) should fail")
+	}
+}
+
+// TestRecvGeneratorSkipsUnrepresentable checks that names NTFS cannot
+// represent (colons, e.g. Perl man pages) are skipped with an IO error
+// instead of aborting the whole transfer.
+func TestRecvGeneratorSkipsUnrepresentable(t *testing.T) {
+	dir := t.TempDir()
+	root, err := NewSafeRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	rt := &Transfer{
+		Logger:   log.New(io.Discard),
+		Opts: &TransferOpts{
+			DebugGTE: func(rsyncopts.DebugLevel, uint16) bool { return false },
+			InfoGTE:  func(rsyncopts.InfoLevel, uint16) bool { return false },
+		},
+		Dest:     dir,
+		DestRoot: root,
+	}
+	if err := rt.recvGenerator(&File{Name: "man3/Convert::Binary::C.3pm", Mode: 0o100644}); err != nil {
+		t.Fatalf("recvGenerator(colon name) = %v, want skip", err)
+	}
+	if rt.IOErrors == 0 || rt.skipCount != 1 {
+		t.Errorf("IOErrors = %d, skipCount = %d, want both counted", rt.IOErrors, rt.skipCount)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "man3")); !os.IsNotExist(err) {
+		t.Errorf("nothing should have been created, stat err = %v", err)
+	}
+
+	// Representable names still work normally.
+	if err := rt.recvGenerator(&File{Name: "okdir", Mode: 0o040755}); err != nil {
+		t.Fatalf("recvGenerator(okdir) = %v", err)
+	}
+	if st, err := os.Stat(filepath.Join(dir, "okdir")); err != nil || !st.IsDir() {
+		t.Errorf("okdir should have been created, stat err = %v", err)
 	}
 }

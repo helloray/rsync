@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/flist"
@@ -282,7 +283,7 @@ func (rt *Transfer) receiveFileListInc(p flist.Params) ([]*File, error) {
 	if err := inc.pushEntries(rt, -1, fes); err != nil {
 		return nil, err
 	}
-	rt.IOErrors = inc.dec.IOError()
+	atomic.StoreInt32(&rt.IOErrors, inc.dec.IOError())
 
 	if rt.Opts.Progress {
 		fmt.Fprintf(rt.Env.Stdout, "\r%d files to consider\n", len(fes))
@@ -312,7 +313,7 @@ func (rt *Transfer) recvFilesInc() error {
 			// The trailing i/o-error words were already consumed per segment
 			// terminator and OR-ed into the decoder's accumulator.
 			inc.markListsDone()
-			rt.IOErrors |= inc.dec.IOError()
+			atomic.OrInt32(&rt.IOErrors, inc.dec.IOError())
 			continue
 		}
 		if idx == protocol.NdxDelStats {

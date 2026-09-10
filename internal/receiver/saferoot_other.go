@@ -19,3 +19,6 @@ func (r *SafeRoot) directPath(name string) string {
 func (r *SafeRoot) fallbackRoot(name string) (*os.Root, string, bool) {
 	return nil, "", false
 }
+
+// On non-Windows platforms every name is representable.
+func unrepresentable(name string) bool { return false }
