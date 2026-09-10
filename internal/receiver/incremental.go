@@ -92,13 +92,25 @@ func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEnt
 		dirName = inc.dirs[dirIdx].Name
 	}
 
-	inc.mu.Lock()
-	defer inc.mu.Unlock()
-	for _, fe := range fes {
+	// flist.c:2467/2814: the C sender writes each segment's entries in
+	// directory-scan (readdir) order and only then sorts flist->files in
+	// place with f_name_cmp — every ndx refers to the sorted positions,
+	// while the wire order is the scan order. Mirror that split: sort the
+	// decoded entries before assigning ndx. Dirs must be appended in the
+	// same sorted order too: the sender's add_dirs_to_tree appends them
+	// "in sorted order, so sorted & files are the same" (flist.c:1973) and
+	// the C receiver fsorts dir_flist per segment (flist.c:3049).
+	files := make([]*File, len(fes))
+	for i, fe := range fes {
 		if dirIdx >= 0 && flist.ParentPath(fe.Name) != dirName {
 			return fmt.Errorf("file-list entry %q does not belong to dir %q", fe.Name, dirName)
 		}
-		f := rt.toFile(fe)
+		files[i] = rt.toFile(fe)
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return protocol.FNameCmp(files[i].Name, files[i].isDir(), files[j].Name, files[j].isDir()) < 0
+	})
+	for _, f := range files {
 		f.Ndx = inc.nextNdx
 		inc.nextNdx++
 		if f.isDir() {

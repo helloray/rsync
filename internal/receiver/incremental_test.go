@@ -52,10 +52,12 @@ func TestIncRecvSegmentFlow(t *testing.T) {
 		}
 	}
 
-	// ndx chain: 1..3, gap, 5..6, gap, 8
+	// ndx chain: 1..3, gap, 5..6, gap, 8. Each segment's ndx refers to the
+	// FNameCmp-sorted positions (the C sender sorts after writing the wire
+	// entries), so files precede dirs: seg0 sorts [".", "top.txt", "a"].
 	for ndx, want := range map[int32]string{
-		1: ".", 2: "a", 3: "top.txt",
-		5: "a/b", 6: "a/c.txt",
+		1: ".", 2: "top.txt", 3: "a",
+		5: "a/c.txt", 6: "a/b",
 		8: "a/b/f",
 	} {
 		if got := inc.lookup(ndx); got == nil || got.Name != want {
@@ -69,12 +71,12 @@ func TestIncRecvSegmentFlow(t *testing.T) {
 	}
 
 	drainNext(t, inc, ".", false, false)       // ndx 1
-	drainNext(t, inc, "a", false, false)       // ndx 2
-	drainNext(t, inc, "top.txt", false, false) // ndx 3
+	drainNext(t, inc, "top.txt", false, false) // ndx 2
+	drainNext(t, inc, "a", false, false)       // ndx 3
 	// all of segment 0 processed and segment 1 has arrived → release
 	drainNext(t, inc, "", true, false)
-	drainNext(t, inc, "a/b", false, false)     // ndx 5
-	drainNext(t, inc, "a/c.txt", false, false) // ndx 6
+	drainNext(t, inc, "a/c.txt", false, false) // ndx 5
+	drainNext(t, inc, "a/b", false, false)     // ndx 6
 	// segment 1 done, segment 2 arrived → release
 	drainNext(t, inc, "", true, false)
 	drainNext(t, inc, "a/b/f", false, false) // ndx 8
