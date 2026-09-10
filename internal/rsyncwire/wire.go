@@ -130,8 +130,18 @@ func (w *MultiplexReader) Read(p []byte) (n int, err error) {
 
 	// Fatal/error messages terminate the session; surface them.
 	switch tag {
-	case MsgError, MsgErrorXfer, MsgIoError, MsgErrorExit:
+	case MsgError, MsgErrorXfer, MsgIoError:
 		return 0, fmt.Errorf("rsync error (msg tag %d): %s", tag, payload)
+	case MsgErrorExit:
+		// rsync/io.c:read_a_msg accepts a 4-byte exit code or an empty
+		// payload; anything else is a framing error.
+		if len(payload) == 4 {
+			return 0, fmt.Errorf("rsync error: peer aborted the transfer (exit code %d)", binary.LittleEndian.Uint32(payload))
+		}
+		if len(payload) != 0 {
+			return 0, fmt.Errorf("rsync error: invalid MSG_ERROR_EXIT payload (%d bytes)", len(payload))
+		}
+		return 0, fmt.Errorf("rsync error: peer aborted the transfer")
 	}
 
 	// Frames that carry no data of their own (keep-alive, info we logged, or
@@ -230,13 +240,31 @@ type msgWriter interface {
 	WriteMsg(tag uint8, p []byte) (n int, err error)
 }
 
+// RERRPartial is the exit code (rsync/errcode.h) a side sends in its
+// MSG_ERROR_EXIT frame when the transfer aborted mid-way because files could
+// not be transferred ("some files/attrs were not transferred").
+const RERRPartial = 23
+
+// SendError best-effort sends the msg text as an MSG_ERROR control frame,
+// mirroring C's rprintf(FERROR, ...) in a remote session (rsync/log.c): the
+// text rides the message channel and the peer prints it. It is a no-op when
+// the write direction is not multiplexed (raw streams below protocol 30
+// cannot carry control frames).
+func (c *Conn) SendError(msg string) error {
+	return sendControlMsg(c.Writer, MsgError, []byte(msg))
+}
+
 // SendErrorExit best-effort sends an MSG_ERROR_EXIT control frame carrying
-// msg, mirroring C's send_msg(MSG_ERROR_EXIT, ...) abort path (rsync/io.c):
-// the peer surfaces the frame as a fatal error instead of hanging or seeing
-// a bare EOF. It is a no-op when the write direction is not multiplexed
-// (raw streams below protocol 30 cannot carry control frames).
-func (c *Conn) SendErrorExit(msg string) error {
-	return sendControlMsg(c.Writer, MsgErrorExit, []byte(msg))
+// the 4-byte exit code, mirroring C's cleanup.c send_msg_int(MSG_ERROR_EXIT,
+// exit_code). rsync/io.c:read_a_msg accepts only a 4-byte or empty payload
+// and rejects anything else as "invalid multi-message", so the abort reason
+// must go out in a preceding SendError frame instead. The peer surfaces the
+// frame as a fatal error instead of hanging or seeing a bare EOF. It is a
+// no-op when the write direction is not multiplexed.
+func (c *Conn) SendErrorExit(exitCode int) error {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(exitCode))
+	return sendControlMsg(c.Writer, MsgErrorExit, b[:])
 }
 
 // SendIoTimeout best-effort sends an MSG_IO_TIMEOUT control frame announcing

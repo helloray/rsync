@@ -138,10 +138,16 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	closeOnErr := func(err error) error {
 		if err != nil {
 			closeOnce.Do(func() {
-				// rsync/io.c:send_msg(MSG_ERROR_EXIT): tell the peer the
+				// rsync/log.c rides the abort reason in MSG_ERROR frames and
+				// cleanup.c follows with the 4-byte exit code in
+				// MSG_ERROR_EXIT (rsync/io.c:read_a_msg rejects any other
+				// payload as "invalid multi-message"): tell the peer the
 				// transfer is aborting so it reports our error instead of
 				// hanging or dying on a bare EOF.
-				if serr := c.SendErrorExit(err.Error()); serr != nil {
+				if serr := c.SendError(err.Error()); serr != nil {
+					rt.Logger.Printf("sending error: %v", serr)
+				}
+				if serr := c.SendErrorExit(rsyncwire.RERRPartial); serr != nil {
 					rt.Logger.Printf("sending error-exit: %v", serr)
 				}
 				c.Close()

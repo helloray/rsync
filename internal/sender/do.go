@@ -91,10 +91,15 @@ func (st *Transfer) Do(crd *rsyncwire.CountingReader, cwr *rsyncwire.CountingWri
 	}
 
 	if err := st.SendFiles(fileList); err != nil {
-		// rsync/io.c:send_msg(MSG_ERROR_EXIT): tell the peer the transfer is
-		// aborting so it reports our error instead of waiting for data that
-		// will never come.
-		if serr := st.Conn.SendErrorExit(err.Error()); serr != nil {
+		// rsync/log.c rides the abort reason in MSG_ERROR frames and
+		// cleanup.c follows with the 4-byte exit code in MSG_ERROR_EXIT
+		// (rsync/io.c:read_a_msg rejects any other payload as "invalid
+		// multi-message"): tell the peer the transfer is aborting so it
+		// reports our error instead of waiting for data that will never come.
+		if serr := st.Conn.SendError(err.Error()); serr != nil {
+			st.Logger.Printf("sending error: %v", serr)
+		}
+		if serr := st.Conn.SendErrorExit(rsyncwire.RERRPartial); serr != nil {
 			st.Logger.Printf("sending error-exit: %v", serr)
 		}
 		return nil, err

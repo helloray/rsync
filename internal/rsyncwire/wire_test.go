@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/gokrazy/rsync/internal/rsyncos"
@@ -17,6 +18,11 @@ func (discardWC) Write(p []byte) (int, error) { return len(p), nil }
 func (discardWC) Close() error                { return nil }
 
 var _ io.WriteCloser = discardWC{}
+
+// nopWriteCloser turns an io.Writer into an io.WriteCloser.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 // encodeMsg builds a single multiplex frame: (mplexBase+tag)<<24 | len, LE,
 // followed by the payload.
@@ -102,5 +108,62 @@ func TestMultiplexReadErrorFrame(t *testing.T) {
 	}
 	if len(control) != 0 {
 		t.Fatalf("expected no control frames, got %+v", control)
+	}
+}
+
+// TestSendErrorExitWireFormat pins the abort-path framing to what C rsync
+// accepts (rsync/io.c:read_a_msg): the reason rides an MSG_ERROR text frame,
+// and MSG_ERROR_EXIT carries exactly a 4-byte exit code.
+func TestSendErrorExitWireFormat(t *testing.T) {
+	var stream bytes.Buffer
+	conn := &Conn{
+		Writer: &MultiplexWriter{Writer: nopWriteCloser{&stream}},
+		Reader: io.NopCloser(&bytes.Reader{}),
+	}
+	if err := conn.SendError("receiver boom"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SendErrorExit(RERRPartial); err != nil {
+		t.Fatal(err)
+	}
+
+	tag, payload, err := (&MultiplexReader{Reader: &stream}).ReadMsg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != MsgError || string(payload) != "receiver boom" {
+		t.Fatalf("frame 0 = (tag %d, %q), want (Error(%d), \"receiver boom\")", tag, payload, MsgError)
+	}
+	tag, payload, err = (&MultiplexReader{Reader: &stream}).ReadMsg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag != MsgErrorExit {
+		t.Fatalf("frame 1 tag = %d, want ErrorExit(%d)", tag, MsgErrorExit)
+	}
+	if len(payload) != 4 || binary.LittleEndian.Uint32(payload) != RERRPartial {
+		t.Fatalf("frame 1 payload = %v, want 4-byte little-endian %d", payload, RERRPartial)
+	}
+}
+
+func TestMultiplexReadErrorExit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		want    string
+	}{
+		{"exit code", encodeMsg(MsgErrorExit, []byte{23, 0, 0, 0}), "exit code 23"},
+		{"empty", encodeMsg(MsgErrorExit, nil), "peer aborted"},
+		{"invalid payload", encodeMsg(MsgErrorExit, []byte("109-byte error text would be rejected by C")), "invalid MSG_ERROR_EXIT payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stream bytes.Buffer
+			stream.Write(tc.payload)
+			mrd := &MultiplexReader{Env: &rsyncos.Env{Stderr: discardWC{}}, Reader: &stream}
+			_, err := mrd.Read(make([]byte, 16))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Read err = %v, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }
