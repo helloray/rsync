@@ -284,8 +284,19 @@ func (rt *Transfer) recvGenerator(f *File) error {
 
 	if !st.Mode().IsRegular() {
 		// A non-regular file with this name exists. Delete it so that we can
-		// create our file instead.
+		// create our file instead. C rsync (generator.c:2148) does the same,
+		// except that a non-empty directory can only be reported and skipped
+		// ("cannot delete non-empty directory") — without --delete there is
+		// no DEL_RECURSE, so the transfer continues instead of aborting. That
+		// case is real on NTFS: INSTALL (file) and install/ (directory) are
+		// distinct on the sender but collide here.
 		if err := rt.DestRoot.Remove(f.Name); err != nil {
+			if st.Mode().IsDir() {
+				rt.Logger.Printf("skipping %s: cannot delete non-empty directory in the way", f.Name)
+				atomic.OrInt32(&rt.IOErrors, 1)
+				atomic.AddInt32(&rt.skipCount, 1)
+				return nil
+			}
 			return fmt.Errorf("unlinking to make room for regular file: %v", err)
 		}
 		return requestFullFile()

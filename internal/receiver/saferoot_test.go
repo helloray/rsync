@@ -139,3 +139,78 @@ func TestRecvGeneratorSkipsUnrepresentable(t *testing.T) {
 		t.Errorf("okdir should have been created, stat err = %v", err)
 	}
 }
+
+// TestRecvGeneratorSkipsNonEmptyDirInWay checks the file-vs-directory type
+// collision (e.g. INSTALL file vs install/ directory colliding on NTFS): the
+// generator skips the file with a counted IO error instead of aborting the
+// transfer, matching C rsync's "cannot delete non-empty directory" behavior.
+func TestRecvGeneratorSkipsNonEmptyDirInWay(t *testing.T) {
+	dir := t.TempDir()
+	root, err := NewSafeRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := root.MkdirAll("d/inner", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "d", "inner", "f.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &Transfer{
+		Logger:   log.New(io.Discard),
+		Opts: &TransferOpts{
+			DebugGTE: func(rsyncopts.DebugLevel, uint16) bool { return false },
+			InfoGTE:  func(rsyncopts.InfoLevel, uint16) bool { return false },
+		},
+		Dest:     dir,
+		DestRoot: root,
+	}
+	if err := rt.recvGenerator(&File{Name: "d", Mode: 0o100644, Length: 5}); err != nil {
+		t.Fatalf("recvGenerator(file over non-empty dir) = %v, want skip", err)
+	}
+	if rt.IOErrors == 0 || rt.skipCount != 1 {
+		t.Errorf("IOErrors = %d, skipCount = %d, want both counted", rt.IOErrors, rt.skipCount)
+	}
+	// The directory and its contents must be untouched.
+	if got, err := os.ReadFile(filepath.Join(dir, "d", "inner", "f.txt")); err != nil || string(got) != "keep" {
+		t.Errorf("dir contents = %q, %v; want keep, nil", got, err)
+	}
+}
+
+// TestRenameReplaceReadOnly checks that replacing a read-only destination
+// file (a previous transfer's preserved r-- mode) works on Windows, where
+// MoveFileEx fails with ERROR_ACCESS_DENIED otherwise.
+func TestRenameReplaceReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	root, err := NewSafeRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := root.MkdirAll("sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "INSTALL"), []byte("v1\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	pf, err := newPendingFile(root, "sub/INSTALL", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf.Write([]byte("v2\n"))
+	if err := pf.CloseAtomicallyReplace(); err != nil {
+		t.Fatalf("CloseAtomicallyReplace over read-only file: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "sub", "INSTALL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "v2\n" {
+		t.Errorf("content = %q, want v2", got)
+	}
+}

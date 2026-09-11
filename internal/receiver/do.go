@@ -202,7 +202,7 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	// never be seen. The peer is gone after this, so the goodbye exchange
 	// is skipped.
 	if n := atomic.LoadInt32(&rt.skipCount); n > 0 {
-		if err := c.SendError(fmt.Sprintf("%d files were skipped (names not representable on this filesystem, see the server log)", n)); err != nil {
+		if err := c.SendError(fmt.Sprintf("%d files were skipped (see the server log for the reasons)", n)); err != nil {
 			return nil, err
 		}
 		if err := c.SendErrorExit(rsyncwire.RERRPartial); err != nil {

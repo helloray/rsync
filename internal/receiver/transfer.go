@@ -81,8 +81,9 @@ type Transfer struct {
 	// and per-file message framing.
 	Session *protocol.Session
 
-	// skipCount tracks entries skipped as unrepresentable (e.g. NTFS cannot
-	// store "Convert::Binary::C.3pm"); written atomically from the generator,
+	// skipCount tracks entries skipped by the generator with a counted IO
+	// error (names unrepresentable on this filesystem, non-empty directories
+	// in the way of a regular file); written atomically from the generator,
 	// read by Do after both goroutines finish.
 	skipCount int32
 

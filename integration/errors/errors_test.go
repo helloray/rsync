@@ -147,12 +147,14 @@ func TestNoReadPermission(t *testing.T) {
 	}
 }
 
-// TestReceiverErrorSurfacedToClient pins the abort-path framing to what C
+// TestReceiverErrorSurfacedToClient pins the per-file error framing to what C
 // rsync accepts: the receiver's error rides an MSG_ERROR text frame followed
 // by an MSG_ERROR_EXIT frame with a 4-byte exit code (rsync/io.c:read_a_msg
 // rejects any other MSG_ERROR_EXIT payload as "invalid multi-message"). A
 // regular file in the source collides with a non-empty directory of the same
-// name in the destination, so the receiver aborts mid-transfer.
+// name in the destination; matching C rsync (generator.c:2148 without
+// --delete), the receiver skips the file and reports it instead of aborting
+// the whole transfer.
 func TestReceiverErrorSurfacedToClient(t *testing.T) {
 	t.Parallel()
 
@@ -194,21 +196,25 @@ func TestReceiverErrorSurfacedToClient(t *testing.T) {
 
 	output := buf.String()
 	t.Logf("output:\n%s\n(end of output)", output)
-	if want := "make room for regular file"; !strings.Contains(output, want) {
-		t.Fatalf("output unexpectedly did not contain the receiver error %q:\n%s", want, output)
+	if want := "1 files were skipped"; !strings.Contains(output, want) {
+		t.Fatalf("output unexpectedly did not contain the receiver skip notice %q:\n%s", want, output)
 	}
 	if got := "invalid multi-message"; strings.Contains(output, got) {
 		t.Fatalf("output unexpectedly contains %q — MSG_ERROR_EXIT framing regressed:\n%s", got, output)
 	}
+	// The skip must not have touched the directory in the way.
+	if got, err := os.ReadFile(filepath.Join(modRoot, "sub", "blocked.txt")); err != nil || string(got) != "x" {
+		t.Fatalf("directory in the way was disturbed: %q, %v", got, err)
+	}
 }
 
-// TestReceiverErrorSurfacedWithInFlightData pins the abort-path shutdown: the
-// receiver aborts while the C sender is still streaming a large file, so the
-// error frames race in-flight data. Closing the socket while the peer has
-// unread data sends a RST that discards the frames, and the client only sees
-// "connection reset by peer" instead of the abort reason. The large file is
-// ordered before the colliding name (f_name_cmp) so the generator hits the
-// error mid-stream.
+// TestReceiverErrorSurfacedWithInFlightData exercises the skip path while a
+// large file's data is (or was just) in flight: the generator skips the
+// colliding name but the session only ends — with the skip notice and error
+// exit — after the whole transfer completes, so the frames race whatever data
+// remains. Closing the socket while the peer has unread data would send a RST
+// that discards the frames, and the client would only see "connection reset by
+// peer" instead of the reason.
 func TestReceiverErrorSurfacedWithInFlightData(t *testing.T) {
 	if testing.Short() {
 		t.Skip("transfers 16 MB to reproduce in-flight data at abort time")
@@ -256,10 +262,18 @@ func TestReceiverErrorSurfacedWithInFlightData(t *testing.T) {
 
 	output := buf.String()
 	t.Logf("output:\n%s\n(end of output)", output)
-	if want := "make room for regular file"; !strings.Contains(output, want) {
-		t.Fatalf("output unexpectedly did not contain the receiver error %q:\n%s", want, output)
+	if want := "1 files were skipped"; !strings.Contains(output, want) {
+		t.Fatalf("output unexpectedly did not contain the receiver skip notice %q:\n%s", want, output)
 	}
 	if got := "connection reset"; strings.Contains(strings.ToLower(output), got) {
 		t.Fatalf("output unexpectedly contains %q — abort path closes the socket with in-flight data:\n%s", got, output)
+	}
+	// The large file must have arrived intact despite the skipped entry.
+	got, err := os.ReadFile(filepath.Join(modRoot, "aaa"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 16<<20 {
+		t.Fatalf("aaa size = %d, want %d", len(got), 16<<20)
 	}
 }
