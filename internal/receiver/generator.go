@@ -166,7 +166,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 		if err == nil && !st.IsDir() {
 			// A file (not a directory) with this name exists. Delete it so that
 			// we can create a directory instead.
-			if err := rt.DestRoot.Remove(f.Name); err != nil {
+			if err := rt.DestRoot.removeMakeRoom(f.Name); err != nil {
 				return fmt.Errorf("unlinking to make room for directory: %v", err)
 			}
 			err = fmt.Errorf("file removed")
@@ -290,7 +290,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 		// no DEL_RECURSE, so the transfer continues instead of aborting. That
 		// case is real on NTFS: INSTALL (file) and install/ (directory) are
 		// distinct on the sender but collide here.
-		if err := rt.DestRoot.Remove(f.Name); err != nil {
+		if err := rt.DestRoot.removeMakeRoom(f.Name); err != nil {
 			if st.Mode().IsDir() {
 				rt.Logger.Printf("skipping %s: cannot delete non-empty directory in the way", f.Name)
 				atomic.OrInt32(&rt.IOErrors, 1)

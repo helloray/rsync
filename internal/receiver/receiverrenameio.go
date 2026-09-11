@@ -97,6 +97,25 @@ func (r *SafeRoot) renameReplace(tmpname, fn string) error {
 	return err
 }
 
+// removeMakeRoom deletes a file that is in the way of another entry. On
+// Windows, unlinking a file with the read-only attribute fails with
+// ERROR_ACCESS_DENIED even though POSIX unlink ignores the file's own
+// permission bits — clear the bit and retry once.
+func (r *SafeRoot) removeMakeRoom(name string) error {
+	err := r.Remove(name)
+	if err == nil {
+		return nil
+	}
+	if st, serr := r.Lstat(name); serr == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o222 == 0 {
+		if r.Chmod(name, 0o666) == nil {
+			if retry := r.Remove(name); retry == nil {
+				return nil
+			}
+		}
+	}
+	return err
+}
+
 func (p *pendingFile) Cleanup() error {
 	err := p.f.Close()
 	if err := p.root.Remove(p.tmpname); err != nil {

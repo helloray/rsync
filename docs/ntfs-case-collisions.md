@@ -44,6 +44,12 @@ C rsync 在此场景(generator.c:2148 → delete_item)的行为:用户的 `rsync
 
 已按 C 语义修复(generator.go 的 make-room 分支):非空目录挡路 → 记日志、`IOErrors`+`skipCount` 计数、跳过该文件继续传;空目录/其他非普通条目照旧删除落盘。修复后该树进入稳定状态:`install/` 目录内容完整同步,文件 `INSTALL` 每轮跳过并计入错误(不再中止传输,也不再与目录互相破坏)。注意这与孪生文件的重传问题不同——文件↔目录碰撞是**稳定跳过**,不会无限重传。
 
+### 变体之二:生成器/接收端竞态(2026-09-11 现场发现,已修复)
+
+上面的修复只覆盖"文件条目处理时目录已存在"的顺序场景。inc-recurse 下文件条目按排序先于目录条目处理(`INSTALL` < `install`),生成器发出文件传输请求后**继续往下走**,把 `install/` 目录建了出来;而文件数据是接收端 goroutine 异步落盘的——等它提交时路径已被目录占据,`renameat ...: Access is denied`(Windows 上 rename 文件覆盖目录即此错),整个传输中止。现场日志证实:`receiver.go: opening local file failed, continuing: ...INSTALL is a directory` 之后一秒 `renameat ... Access is denied`(iptables-1.4.21)。
+
+修复:接收端提交(rename)失败且目标已是目录时 → 与生成器同语义,跳过 + `IOErrors`/`skipCount` 计数,丢弃临时文件,传输继续(receiver.go 的 commit 错误分支)。另一处配套:生成器目录分支"腾地方"删除只读文件时,Windows 会 Access denied(POSIX unlink 忽略文件自身权限位)→ `removeMakeRoom` 先清只读位再删。
+
 ## 参照:C rsync 的行为
 
 cygwin/msys2 版 C rsync daemon 能同时存下两个孪生文件:cygwin 3.1+ 在创建目录时自动设置 Windows 逐目录大小写敏感标志(FileCaseSensitiveInfo,Windows 10 1703+)。因此 C daemon 没有此问题;原生 Windows 程序(包括 Go daemon)默认存不下。

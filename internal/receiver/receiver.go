@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/gokrazy/rsync"
 	"github.com/gokrazy/rsync/internal/protocol"
@@ -324,6 +325,20 @@ func (rt *Transfer) receiveData(f *File, localFile *os.File) error {
 	}
 
 	if err := commit(); err != nil {
+		// Case-collision race: the generator processes the flist in sorted
+		// order, so a file entry (INSTALL) is requested before its case-twin
+		// directory entry (install/) is created — but the data lands
+		// asynchronously, and by commit time the destination name can be that
+		// directory on a case-insensitive filesystem (NTFS). The
+		// generator-side skip cannot see this ordering; skip here instead of
+		// aborting, mirroring the generator's counted-error semantics.
+		if st, serr := rt.DestRoot.Lstat(f.Name); serr == nil && st.IsDir() {
+			discardPartial = true
+			rt.Logger.Printf("skipping %s: a directory occupies the path (case-insensitive filesystem collision)", f.Name)
+			atomic.OrInt32(&rt.IOErrors, 1)
+			atomic.AddInt32(&rt.skipCount, 1)
+			return nil
+		}
 		return err
 	}
 	committed = true
