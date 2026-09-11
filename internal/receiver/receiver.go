@@ -214,7 +214,7 @@ func (rt *Transfer) receiveData(f *File, localFile *os.File) error {
 			if err := tmp.Close(); err != nil {
 				return err
 			}
-			if err := rt.DestRoot.Rename(tmpName, f.Name); err != nil {
+			if err := rt.DestRoot.renameReplace(tmpName, f.Name); err != nil {
 				return err
 			}
 			_ = rt.DestRoot.Remove(partialName)

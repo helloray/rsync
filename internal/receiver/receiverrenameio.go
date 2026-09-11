@@ -74,10 +74,27 @@ func (p *pendingFile) CloseAtomicallyReplace() error {
 	if err := p.f.Close(); err != nil {
 		return err
 	}
-	if err := p.root.Rename(p.tmpname, p.fn); err != nil {
-		return err
+	return p.root.renameReplace(p.tmpname, p.fn)
+}
+
+// renameReplace moves tmpname onto fn. POSIX rename ignores the replaced
+// file's own permission bits, but Windows fails with ERROR_ACCESS_DENIED
+// when the destination carries the read-only attribute — which a previous
+// transfer set by preserving an r-- mode. Clear it and retry once;
+// setPerms restores the final mode afterwards.
+func (r *SafeRoot) renameReplace(tmpname, fn string) error {
+	err := r.Rename(tmpname, fn)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if st, serr := r.Lstat(fn); serr == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o222 == 0 {
+		if r.Chmod(fn, 0o666) == nil {
+			if retry := r.Rename(tmpname, fn); retry == nil {
+				return nil
+			}
+		}
+	}
+	return err
 }
 
 func (p *pendingFile) Cleanup() error {
