@@ -103,6 +103,12 @@ type Transfer struct {
 	Groups          map[int32]mapping
 	retouchDirPerms bool
 
+	// genRequested is set when recvGenerator writes an ITEM_TRANSFER request
+	// for the entry it is processing, so generateFilesInc can distinguish a
+	// requested entry (whose data frame arrives later) from a skipped one
+	// (releasable immediately). Generator goroutine only.
+	genRequested bool
+
 	// inc holds the incremental-recursion receiver state; nil when the
 	// transfer uses a complete file list. Set by ReceiveFileList before the
 	// transfer goroutines start.

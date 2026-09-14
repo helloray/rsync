@@ -32,13 +32,30 @@ type incRecv struct {
 	queue []*File // ready entries in wire (arrival) order
 	qhead int
 
-	// byNdx, allFiles and dirs are written by the frame-loop goroutine only
-	// (before Do's errgroup joins) and read by the frame loop, the deletion
+	// skipReleases carries the ndx of entries the generator skipped (no
+	// transfer request written) to the frame loop, which alone mutates
+	// byNdx and applies the releases. Generator goroutine sends are
+	// non-blocking: a full channel drops the release, which costs memory
+	// but never correctness. See releaseFile for the release contract.
+	skipReleases chan int32
+
+	// byNdx and dirs are written by the frame-loop goroutine only (before
+	// Do's errgroup joins) and read by the frame loop, the deletion
 	// goroutine (after listsDone) and the final touch-up (after both other
-	// goroutines have finished).
-	byNdx    map[int32]*File // wire ndx → file, for routing incoming data
-	allFiles []*File         // every received entry, arrival order
-	dirs     []*File         // directories in arrival order = the sender's dir index space
+	// goroutines have finished). byNdx entries are deleted again once the
+	// entry's file data has been received (releaseFile) — from that point
+	// on, no frame references the ndx and the File can be garbage
+	// collected. dirs survives until the end for the permission touch-up.
+	byNdx map[int32]*File // wire ndx → file, for routing incoming data
+	dirs  []*File         // directories in arrival order = the sender's dir index space
+
+	// names holds just the received entries' names, for the --delete
+	// comparison late in the transfer. It is the compact remnant of the
+	// file list: full File structs are freed as their data arrives, only
+	// these strings stay (rsync keeps the whole flist until the end, which
+	// is its dominant per-entry memory cost under inc-recurse). Written by
+	// the frame-loop goroutine, read (and sorted in place) after listsDone.
+	names []string
 
 	// segCounts[i] is the entry count of received segment i (0 = initial
 	// list); nextNdx is the wire ndx of the next arriving entry, following
@@ -67,6 +84,9 @@ func newIncRecv(dec *flist.Decoder) *incRecv {
 		byNdx:        map[int32]*File{},
 		nextNdx:      1, // the initial list starts at ndx 1 under inc-recurse
 		lastReleased: -1,
+		// Sized to hold the skips of a typical segment batch; beyond that,
+		// releases are dropped and the entry just lives until phase end.
+		skipReleases: make(chan int32, 8192),
 	}
 	inc.cond = sync.NewCond(&inc.mu)
 	return inc
@@ -83,12 +103,13 @@ func (inc *incRecv) fail(err error) {
 
 // pushEntries stores one decoded segment. dirIdx is the sender's directory
 // index from the segment header (-1 for the initial list); every entry must
-// name dirIdx's directory as its parent.
-func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEntry) error {
+// name dirIdx's directory as its parent. It returns the segment's entries
+// with their wire ndx assigned.
+func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEntry) ([]*File, error) {
 	var dirName string
 	if dirIdx >= 0 {
 		if int(dirIdx) >= len(inc.dirs) {
-			return fmt.Errorf("invalid file-list dir index %d (have %d dirs)", dirIdx, len(inc.dirs))
+			return nil, fmt.Errorf("invalid file-list dir index %d (have %d dirs)", dirIdx, len(inc.dirs))
 		}
 		dirName = inc.dirs[dirIdx].Name
 	}
@@ -104,7 +125,7 @@ func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEnt
 	files := make([]*File, len(fes))
 	for i, fe := range fes {
 		if dirIdx >= 0 && flist.ParentPath(fe.Name) != dirName {
-			return fmt.Errorf("file-list entry %q does not belong to dir %q", fe.Name, dirName)
+			return nil, fmt.Errorf("file-list entry %q does not belong to dir %q", fe.Name, dirName)
 		}
 		files[i] = rt.toFile(fe)
 	}
@@ -118,14 +139,19 @@ func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEnt
 			inc.dirs = append(inc.dirs, f)
 		}
 		inc.byNdx[f.Ndx] = f
-		inc.allFiles = append(inc.allFiles, f)
+		if rt.Opts.DeleteMode {
+			// Only --delete ever reads the name list (deleteIncWhenReady);
+			// without it the names would be pure retention (the dominant
+			// per-entry cost left after the release optimizations).
+			inc.names = append(inc.names, f.Name)
+		}
 		inc.queue = append(inc.queue, f)
 	}
 	inc.segCounts = append(inc.segCounts, len(fes))
 	inc.nextNdx++ // the +1 gap between consecutive segments' ndx ranges
 	inc.unfreed++
 	inc.cond.Broadcast()
-	return nil
+	return files, nil
 }
 
 // decodeSegment reads one file-list segment from the sender stream and stores
@@ -142,7 +168,8 @@ func (inc *incRecv) decodeSegment(rt *Transfer, dirIdx int32) error {
 		}
 		fes = append(fes, fe)
 	}
-	return inc.pushEntries(rt, dirIdx, fes)
+	_, err := inc.pushEntries(rt, dirIdx, fes)
+	return err
 }
 
 // next blocks until one of: a release-DONE is due (rel=true), an entry is
@@ -235,24 +262,53 @@ func (inc *incRecv) freeOne() bool {
 // Frame-loop goroutine only.
 func (inc *incRecv) unfreedLists() int { return inc.unfreed }
 
-// lookup returns the file for a wire ndx, or nil. Frame-loop goroutine only.
+// lookup returns the file for a wire ndx, or nil once the entry has been
+// released. Frame-loop goroutine only.
 func (inc *incRecv) lookup(ndx int32) *File { return inc.byNdx[ndx] }
 
-// snapshot returns a copy of every received entry in arrival order.
-func (inc *incRecv) snapshot() []*File {
-	inc.mu.Lock()
-	defer inc.mu.Unlock()
-	out := make([]*File, len(inc.allFiles))
-	copy(out, inc.allFiles)
-	return out
+// releaseFile drops the wire-ndx → file mapping once the entry's file data
+// has been fully received: the sender writes exactly one ndx+iflags record
+// per file (rsync/sender.c:766, a dry-run's data-less echo is consumed by
+// the same frame), so no later frame references the ndx and the File can be
+// garbage collected. Frame-loop goroutine only.
+func (inc *incRecv) releaseFile(ndx int32) {
+	delete(inc.byNdx, ndx)
 }
 
-// deleteList returns every received entry sorted by plain name, the order
-// findInFileList's binary search expects (rsync/receiver.c:delete_files).
-func (inc *incRecv) deleteList() []*File {
-	out := inc.snapshot()
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+// queueSkipRelease hands a skipped entry's ndx to the frame loop. Generator
+// goroutine only; never blocks (a dropped release only delays the free).
+func (inc *incRecv) queueSkipRelease(ndx int32) {
+	select {
+	case inc.skipReleases <- ndx:
+	default:
+	}
+}
+
+// applySkipReleases releases the routing slots of entries the generator
+// skipped. A skip never produces a frame: the Go generator does not itemize
+// skips (so the sender echoes nothing) and did not request data, so by the
+// time the entry has been handed out of the queue no frame can reference its
+// ndx anymore. Frame-loop goroutine only.
+func (inc *incRecv) applySkipReleases() {
+	for {
+		select {
+		case ndx := <-inc.skipReleases:
+			delete(inc.byNdx, ndx)
+		default:
+			return
+		}
+	}
+}
+
+// deleteList returns the received entries' names sorted by plain name, the
+// order findInFileList's binary search expects (rsync/receiver.c:
+// delete_files). It takes ownership of inc.names: after listsDone no
+// segment can arrive, so the slice is read-only and may be sorted in place.
+func (inc *incRecv) deleteList() []string {
+	inc.mu.Lock()
+	defer inc.mu.Unlock()
+	sort.Strings(inc.names)
+	return inc.names
 }
 
 // rsync/flist.c:recv_file_list (initial list of an incremental transfer):
@@ -280,7 +336,8 @@ func (rt *Transfer) receiveFileListInc(p flist.Params) ([]*File, error) {
 				len(fes)-1, fe.Name, fe.Mode, fe.Length, fe.Uid, fe.Gid)
 		}
 	}
-	if err := inc.pushEntries(rt, -1, fes); err != nil {
+	files, err := inc.pushEntries(rt, -1, fes)
+	if err != nil {
 		return nil, err
 	}
 	atomic.StoreInt32(&rt.IOErrors, inc.dec.IOError())
@@ -288,7 +345,7 @@ func (rt *Transfer) receiveFileListInc(p flist.Params) ([]*File, error) {
 	if rt.Opts.Progress {
 		fmt.Fprintf(rt.Env.Stdout, "\r%d files to consider\n", len(fes))
 	}
-	return inc.snapshot(), nil
+	return files, nil
 }
 
 // rsync/receiver.c:recv_files (incremental recursion): the frame loop is the
@@ -303,6 +360,7 @@ func (rt *Transfer) recvFilesInc() error {
 		maxPhase = 2
 	}
 	for {
+		inc.applySkipReleases()
 		idx, err := rt.readNdx()
 		if err != nil {
 			inc.fail(err)
@@ -372,19 +430,20 @@ func (rt *Transfer) recvFilesInc() error {
 				}
 			}
 		}
+		if iflags&rsync.ITEM_TRANSFER == 0 {
+			// The sender echoes itemize messages for entries that do not
+			// carry data (e.g. attribute-only updates). The entry may
+			// already have been released, so nothing is looked up here.
+			if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
+				rt.Logger.Printf("recvFiles idx=%d iflags=0x%x (no transfer)", idx, iflags)
+			}
+			continue
+		}
 		f := inc.lookup(idx)
 		if f == nil {
 			err := fmt.Errorf("invalid file index %d under incremental recursion", idx)
 			inc.fail(err)
 			return err
-		}
-		if iflags&rsync.ITEM_TRANSFER == 0 {
-			// The sender echoes itemize messages for entries that do not
-			// carry data (e.g. attribute-only updates).
-			if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
-				rt.Logger.Printf("recvFiles idx=%d iflags=0x%x (no transfer)", idx, iflags)
-			}
-			continue
 		}
 		if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
 			rt.Logger.Printf("receiving file idx=%d iflags=0x%x: %+v", idx, iflags, f)
@@ -396,6 +455,10 @@ func (rt *Transfer) recvFilesInc() error {
 			inc.fail(err)
 			return err
 		}
+		// The data for this entry is complete and it was the entry's last
+		// consumer: drop the routing slot so the File can be garbage
+		// collected instead of piling up until the end of the transfer.
+		inc.releaseFile(idx)
 	}
 	if rt.Opts.DebugGTE(rsyncopts.DEBUG_RECV, 1) {
 		rt.Logger.Printf("recvFiles finished")
@@ -422,8 +485,14 @@ func (rt *Transfer) generateFilesInc() error {
 		case done:
 			return rt.writePhaseDones()
 		default:
+			rt.genRequested = false
 			if err := rt.recvGenerator(f); err != nil {
 				return err
+			}
+			if !rt.genRequested {
+				// The entry was skipped without a transfer request: no data
+				// frame will arrive for it, so release its routing slot.
+				rt.inc.queueSkipRelease(f.Ndx)
 			}
 		}
 	}

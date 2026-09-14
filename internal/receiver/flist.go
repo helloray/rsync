@@ -49,11 +49,11 @@ func makedev(major, minor int32) int32 {
 }
 
 // rsync/receiver.c:delete_files
-func findInFileList(fileList []*File, name string) bool {
+func findInFileList(fileList []string, name string) bool {
 	i := sort.Search(len(fileList), func(i int) bool {
-		return fileList[i].Name >= name
+		return fileList[i] >= name
 	})
-	return i < len(fileList) && fileList[i].Name == name
+	return i < len(fileList) && fileList[i] == name
 }
 
 type File struct {

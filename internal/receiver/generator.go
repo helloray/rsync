@@ -254,6 +254,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 		if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
+		rt.genRequested = true
 		if rt.Opts.DryRun {
 			return nil
 		}
@@ -273,6 +274,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 				if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 					return err
 				}
+				rt.genRequested = true
 				return rt.generateAndSendSums(pin, psize)
 			}
 		}
@@ -322,6 +324,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 		if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 			return err
 		}
+		rt.genRequested = true
 
 		return nil
 	}
@@ -341,6 +344,7 @@ func (rt *Transfer) recvGenerator(f *File) error {
 	if err := rt.writeNdx(f.Ndx, rsync.ITEM_TRANSFER); err != nil {
 		return err
 	}
+	rt.genRequested = true
 
 	return rt.generateAndSendSums(in, st.Size())
 }

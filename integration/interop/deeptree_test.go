@@ -206,6 +206,73 @@ func syncGoClientPushToC(t *testing.T, source, dest string, extraArgs ...string)
 	}
 }
 
+// pushToGoDaemon pushes the deep tree from a local C rsync client INTO a Go
+// rsyncd daemon — the receiver-memory critical direction, since the Go
+// receiver holds the incoming file list — with extra client args (e.g.
+// --delete).
+func pushToGoDaemon(t *testing.T, source, dest string, extraArgs ...string) {
+	t.Helper()
+	srv := rsynctest.New(t, rsynctest.WritableInteropModule(dest))
+	args := append([]string{"--archive", "--port=" + srv.Port}, extraArgs...)
+	runCRsync(t, source, append(args, "./", "rsync://localhost/interop/")...)
+}
+
+// TestInteropDeepTreeCClient: Go daemon receiver ↔ C client sender, >1000
+// entries, then a dry-run re-sync with --ignore-times (re-requests every
+// entry without any data flow, exercising the frame loop's itemize-echo
+// routing against released entries), then a --delete re-sync that must
+// remove a deleted file and an entire deleted subtree.
+func TestInteropDeepTreeCPushToGoDaemon(t *testing.T) {
+	t.Parallel()
+	source := createDeepTree(t)
+	dest := t.TempDir()
+
+	pushToGoDaemon(t, source, dest)
+	verifySame(t, source, dest)
+
+	pushToGoDaemon(t, source, dest, "--dry-run", "--ignore-times")
+	verifySame(t, source, dest)
+
+	if err := os.Remove(filepath.Join(source, "d05", "f01.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(source, "d12", "sub2")); err != nil {
+		t.Fatal(err)
+	}
+	pushToGoDaemon(t, source, dest, "--delete")
+	verifySame(t, source, dest)
+}
+
+// TestInteropDeepTreeGoClientPullFromCDelete: C rsync sender → Go client
+// receiver with --delete, against a destination seeded with stale
+// destination-only entries that must be removed.
+func TestInteropDeepTreeGoClientPullFromCDelete(t *testing.T) {
+	t.Parallel()
+	source := createDeepTree(t)
+	dest := t.TempDir()
+
+	syncGoClientPullFromC(t, source, dest)
+	verifySame(t, source, dest)
+
+	if err := os.Remove(filepath.Join(source, "d20", "f07.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(source, "d02", "sub1")); err != nil {
+		t.Fatal(err)
+	}
+	staleFile := filepath.Join(dest, "stale.txt")
+	if err := os.WriteFile(staleFile, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	staleDir := filepath.Join(dest, "d99")
+	if err := os.Mkdir(staleDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	syncGoClientPullFromC(t, source, dest, "--delete")
+	verifySame(t, source, dest)
+}
+
 // TestInteropDeepTreeCCClient: Go daemon (lazy inc-recurse sender) ↔ C
 // client, >1000 entries, then a --checksum re-sync.
 func TestInteropDeepTreeCCClient(t *testing.T) {

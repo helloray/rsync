@@ -15,28 +15,21 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func isTopDir(f *File) bool {
-	// TODO: once we check the f.Flags:
-	// if !f.FileMode().IsDir() {
-	//    // non-directories can get the top_dir flag set,
-	//    // but it must be ignored (only for protocol reasons).
-	//   return false
-	// }
-	// return (f.Flags & TOP_DIR) != 0
-	return f.Name == "."
-}
-
-func (rt *Transfer) deleteFiles(fileList []*File) error {
+// deleteFiles removes destination entries that are absent from the remote
+// file list. fileList holds just the remote names (rsync/receiver.c:
+// delete_files keeps the whole flist for this; we keep only names), sorted
+// for findInFileList's binary search.
+func (rt *Transfer) deleteFiles(fileList []string) error {
 	if rt.IOErrors > 0 {
 		rt.Logger.Printf("IO error encountered, skipping file deletion")
 		return nil
 	}
 
-	for _, f := range fileList {
-		if !isTopDir(f) {
+	for _, name := range fileList {
+		if name != "." {
 			continue
 		}
-		rt.Logger.Printf("deleting in %s", f.Name)
+		rt.Logger.Printf("deleting in %s", name)
 		// Other rsync implementations generate a local file list and compare it
 		// with the remote file list, we re-implement the path→name mapping part
 		// of file list generation here. We could change it for consistency.
@@ -124,7 +117,13 @@ func (rt *Transfer) writeDelStats() error {
 // rsync/main.c:do_recv
 func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsyncstats.TransferStats, error) {
 	if rt.inc == nil && rt.Opts.DeleteMode {
-		if err := rt.deleteFiles(fileList); err != nil {
+		// The complete-list path keeps every File until the end anyway, so
+		// projecting just the names (sharing the string data) costs little.
+		names := make([]string, len(fileList))
+		for i, f := range fileList {
+			names[i] = f.Name
+		}
+		if err := rt.deleteFiles(names); err != nil {
 			return nil, err
 		}
 	}
@@ -178,7 +177,10 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 		return nil, err
 	}
 	if rt.inc != nil {
-		fileList = rt.inc.snapshot()
+		// Only the directory entries survive to the end of an incremental
+		// transfer (everything else is released as its data arrives), which
+		// is all the permission touch-up looks at.
+		fileList = rt.inc.dirs
 	}
 	if rt.retouchDirPerms /* || rt.retouchDirTimes */ {
 		if err := rt.touchUpDirs(fileList); err != nil {
