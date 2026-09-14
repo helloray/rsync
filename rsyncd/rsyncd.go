@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -514,6 +515,12 @@ func (s *Server) HandleConnArgs(ctx context.Context, conn *Conn, module *Module,
 
 // handleConn is equivalent to rsync/main.c:start_server
 func (s *Server) handleConn(ctx context.Context, conn *Conn, module *Module, pc *rsyncopts.Context, negotiate bool) (err error) {
+	// A transfer's peak heap becomes free pages when the transfer ends, but
+	// the runtime's scavenger returns them to the OS only gradually (minutes).
+	// In a long-lived daemon the whole peak would therefore sit in the working
+	// set between syncs; hand it back right away instead.
+	defer debug.FreeOSMemory()
+
 	rd := conn.rd
 	crd := conn.crd
 	cwr := conn.cwr
