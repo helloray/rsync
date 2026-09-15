@@ -17,6 +17,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// openFailedError marks a failure to open or stat the source file before the
+// sender wrote any wire bytes for it (rsync/sender.c:do_open at sender.c:709,
+// which precedes write_ndx at sender.c:766): the file's whole block can be
+// replaced by an MSG_NO_SEND frame and the transfer continues. Failures after
+// the ndx/sums went out (e.g. a mid-file read error) are not wrapped — there
+// the only safe option is aborting the session, like C does.
+type openFailedError struct{ err error }
+
+func (e *openFailedError) Error() string { return e.err.Error() }
+func (e *openFailedError) Unwrap() error { return e.err }
+
 // ndxWrite returns the NDX writer codec, creating it from the negotiated
 // protocol version on first use.
 func (st *Transfer) ndxWrite() *protocol.NdxCodec {
@@ -280,19 +291,24 @@ func (st *Transfer) SendFiles(fileList *fileList) error {
 			err = st.hashSearch(targets, tagTable, head, fileIndex, *fl)
 		}
 		if err != nil {
-			if _, ok := err.(*os.PathError); ok {
-				// OpenFile() failed. Log the error (server side only) and
-				// proceed. Only starting with protocol 30, an I/O error flag is
-				// sent after the file transfer phase.
-				if os.IsNotExist(err) {
-					st.Logger.Printf("file has vanished: %s", fl.path)
-				} else {
-					st.Logger.Printf("sendFiles: %v", err)
-				}
-				continue
-			} else {
+			var ofe *openFailedError
+			if !errors.As(err, &ofe) {
 				return err
 			}
+			// rsync/sender.c:709-723: the source file could not be opened
+			// (ENOENT → "file has vanished") before any wire bytes for it
+			// were written. Log it, replace the file's block with
+			// MSG_NO_SEND (a no-op below protocol 30, matching C's guard),
+			// and keep going — one missing file must not abort the session.
+			if os.IsNotExist(ofe.err) {
+				st.Logger.Printf("file has vanished: %s", fl.path)
+			} else {
+				st.Logger.Printf("sendFiles: %v", ofe.err)
+			}
+			if serr := st.Conn.SendNoSend(fileIndex); serr != nil {
+				return serr
+			}
+			continue
 		}
 	}
 
@@ -360,13 +376,13 @@ func (st *Transfer) sendFile(fileIndex int32, fl file) error {
 
 	f, err := fl.source.Open(fl.path)
 	if err != nil {
-		return err
+		return &openFailedError{err}
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return &openFailedError{err}
 	}
 
 	if err := st.writeNdxTransfer(fileIndex); err != nil {

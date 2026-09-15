@@ -100,6 +100,11 @@ func (f *File) FileMode() fs.FileMode {
 
 // rsync/flist.c:recv_file_list
 func (rt *Transfer) ReceiveFileList() ([]*File, error) {
+	// Install the stream-level control-frame filter before anything reads
+	// from the connection: control frames can interleave between any two
+	// DATA frames, including inside file-list segments, so every reader —
+	// not just the ndx loops — must tolerate them.
+	rt.filterControlFrames()
 	p := rt.flistParams()
 	if p.IncRecurse {
 		// Incremental recursion: only the initial segment is read here; the

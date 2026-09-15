@@ -129,9 +129,14 @@ func (w *MultiplexReader) Read(p []byte) (n int, err error) {
 		return 0, err
 	}
 
-	// Fatal/error messages terminate the session; surface them.
+	// Fatal/error messages terminate the session; surface them. MSG_IO_ERROR
+	// is deliberately NOT here: C carries a 4-byte io_error bitmask in it and
+	// merely ORs it into the local io_error counter (rsync/io.c:1702-1711,
+	// sent by the sender after a phase with failures, rsync/sender.c:809) —
+	// treating it as fatal would abort every transfer in which the sender
+	// logged a per-file error like "file has vanished".
 	switch tag {
-	case MsgError, MsgErrorXfer, MsgIoError:
+	case MsgError, MsgErrorXfer:
 		return 0, fmt.Errorf("rsync error (msg tag %d): %s", tag, payload)
 	case MsgErrorExit:
 		// rsync/io.c:read_a_msg accepts a 4-byte exit code or an empty
@@ -161,7 +166,7 @@ func (w *MultiplexReader) Read(p []byte) (n int, err error) {
 	switch tag {
 	case MsgData:
 		// continues below
-	case MsgSuccess, MsgDeleted, MsgNoSend, MsgRedo, MsgStats,
+	case MsgSuccess, MsgDeleted, MsgNoSend, MsgRedo, MsgStats, MsgIoError,
 		MsgErrorSock, MsgLog, MsgClient, MsgErrorUtf8, MsgWarning, MsgIoTimeout:
 		return 0, &ControlFrameError{Tag: tag, Payload: payload}
 	default:
@@ -302,6 +307,19 @@ func (c *Conn) SendErrorExit(exitCode int) error {
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], uint32(exitCode))
 	return sendControlMsg(c.Writer, MsgErrorExit, b[:])
+}
+
+// SendNoSend best-effort sends an MSG_NO_SEND control frame carrying the
+// 4-byte flist index (rsync/sender.c:send_msg_int(MSG_NO_SEND, ndx)): the
+// sender could not open the source file, so this frame replaces the file's
+// data block and the peer's generator releases the entry
+// (rsync/io.c:read_a_msg:1809). It is a no-op when the write direction is
+// not multiplexed (raw streams below protocol 30 cannot carry it, matching
+// C's `if (protocol_version >= 30)` guard).
+func (c *Conn) SendNoSend(ndx int32) error {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(ndx))
+	return sendControlMsg(c.Writer, MsgNoSend, b[:])
 }
 
 // SendIoTimeout best-effort sends an MSG_IO_TIMEOUT control frame announcing

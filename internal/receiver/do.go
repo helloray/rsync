@@ -1,6 +1,7 @@
 package receiver
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -229,9 +230,24 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 	// unbuffered, so writing both goodbyes back-to-back deadlocks against the
 	// sender's echo write.
 	if protocol.SupportsExtendedGoodbye(rt.ProtocolVersion()) {
-		finish, err := rt.ndxRead().ReadNdx(rt.Conn)
-		if err != nil {
-			return nil, err
+		// Control frames (per-file Success/NoSend/Deleted, stats, ...) can
+		// interleave with the goodbye exchange because the peer's processes
+		// buffer their output independently; skip past them instead of
+		// aborting (mirrors the sender's goodbye loop in
+		// internal/sender/do.go).
+		var finish int32
+		for {
+			f, err := rt.ndxRead().ReadNdx(rt.Conn)
+			if err != nil {
+				var cfe *rsyncwire.ControlFrameError
+				if !errors.As(err, &cfe) {
+					return nil, err
+				}
+				rt.Logger.Printf("ignoring control frame tag %d while reading the goodbye", cfe.Tag)
+				continue
+			}
+			finish = f
+			break
 		}
 		if finish != protocol.NdxDone {
 			return nil, fmt.Errorf("protocol error: expected goodbye echo, got %d", finish)

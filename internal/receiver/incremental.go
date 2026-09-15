@@ -376,8 +376,15 @@ func (rt *Transfer) recvFilesInc() error {
 		inc.applySkipReleases()
 		idx, err := rt.readNdx()
 		if err != nil {
-			inc.fail(err)
-			return err
+			// Control frames (NO_SEND, IO_ERROR, ...) can surface wherever
+			// DATA was expected; routeControlFrame books them (including
+			// releasing a NO_SEND entry's routing slot) and the loop keeps
+			// reading.
+			if rt.logControlFrame(err, nil) == nil {
+				inc.fail(err)
+				return err
+			}
+			continue
 		}
 		if idx == protocol.NdxFlistEOF {
 			// sender.c:send_extra_file_list: all segments are on the wire.

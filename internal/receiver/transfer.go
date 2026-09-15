@@ -114,6 +114,15 @@ type Transfer struct {
 	// transfer goroutines start.
 	inc *incRecv
 
+	// ctlFiltered records that the stream-level control-frame filter
+	// (filterControlFrames) has been installed on Conn.Reader.
+	ctlFiltered bool
+
+	// recvFileList is the complete file list the transfer goroutines work
+	// on; used by routeControlFrame to resolve control-frame indices to
+	// names. Nil under incremental recursion (inc.lookup resolves instead).
+	recvFileList []*File
+
 	// delStats counts what deleteFiles removed, reported to the sender as
 	// NDX_DEL_STATS at protocol >= 31 (rsync/main.c:write_del_stats).
 	delStats delStats

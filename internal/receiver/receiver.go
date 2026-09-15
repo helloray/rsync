@@ -3,6 +3,7 @@ package receiver
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,10 +15,26 @@ import (
 	"github.com/gokrazy/rsync/internal/protocol"
 	"github.com/gokrazy/rsync/internal/rsyncchecksum"
 	"github.com/gokrazy/rsync/internal/rsyncopts"
+	"github.com/gokrazy/rsync/internal/rsyncwire"
 )
+
+// logControlFrame handles a multiplex control frame that surfaced where a
+// file index was expected; it delegates to routeControlFrame (shared with
+// the stream-level filter in controlframe.go) and returns the control
+// frame, or nil when err was not one — the caller must then treat err as
+// fatal.
+func (rt *Transfer) logControlFrame(err error, fileList []*File) *rsyncwire.ControlFrameError {
+	var cfe *rsyncwire.ControlFrameError
+	if !errors.As(err, &cfe) {
+		return nil
+	}
+	rt.routeControlFrame(cfe, fileList)
+	return cfe
+}
 
 // rsync/receiver.c:recv_files
 func (rt *Transfer) RecvFiles(fileList []*File) error {
+	rt.recvFileList = fileList
 	if rt.inc != nil {
 		// Incremental recursion: the frame loop also consumes the file-list
 		// segments interleaved with the file data.
@@ -34,6 +51,9 @@ func (rt *Transfer) RecvFiles(fileList []*File) error {
 	for {
 		idx, err := rt.readNdx()
 		if err != nil {
+			if rt.logControlFrame(err, fileList) != nil {
+				continue
+			}
 			return err
 		}
 		if idx == -1 {

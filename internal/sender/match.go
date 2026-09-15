@@ -21,13 +21,13 @@ func (st *Transfer) hashSearch(targets []target, tagTable map[uint16]int, head r
 	st.Logger.Printf("hashSearch(path=%s, len(sums)=%d)", fl.path, len(head.Sums))
 	f, err := fl.source.Open(fl.path)
 	if err != nil {
-		return err
+		return &openFailedError{err}
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return &openFailedError{err}
 	}
 
 	readSize := max(3*head.BlockLength, 256*1024)
