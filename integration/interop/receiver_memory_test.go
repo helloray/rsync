@@ -151,10 +151,13 @@ func TestReceiverMemoryLargeTree(t *testing.T) {
 	// + byNdx slot, ~200 B/entry) for the whole transfer: ~11 MB of live
 	// retention at 54k entries on top of the names, the in-flight window
 	// and process scaffolding. Post-optimization only the names
-	// (~40 B/entry), the directories and the in-flight window stay. The
-	// threshold sits between the two.
-	if maxLive > 8<<20 {
-		t.Errorf("receiver max live heap during transfer = %.1f MB, want <= 8 MB",
+	// (~40 B/entry), the in-flight window and process scaffolding stay —
+	// the directory list was hashed down to 24 B/dir
+	// (docs/dirs-two-phase.md), with the touch-up entries collected
+	// on demand. Measured: 1.2 MB fresh push, 1.7 MB re-sync. The
+	// threshold sits well above both but far below the old retention.
+	if maxLive > 4<<20 {
+		t.Errorf("receiver max live heap during transfer = %.1f MB, want <= 4 MB",
 			float64(maxLive)/(1<<20))
 	}
 	t.Logf("receiver max live heap during transfer: %.1f MB",
@@ -174,8 +177,8 @@ func TestReceiverMemoryLargeTree(t *testing.T) {
 	close(stop2)
 	maxLive2 := <-live2Ch
 
-	if maxLive2 > 8<<20 {
-		t.Errorf("re-sync max live heap = %.1f MB, want <= 8 MB",
+	if maxLive2 > 4<<20 {
+		t.Errorf("re-sync max live heap = %.1f MB, want <= 4 MB",
 			float64(maxLive2)/(1<<20))
 	}
 	t.Logf("re-sync max live heap: %.1f MB", float64(maxLive2)/(1<<20))

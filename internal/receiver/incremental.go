@@ -39,15 +39,28 @@ type incRecv struct {
 	// but never correctness. See releaseFile for the release contract.
 	skipReleases chan int32
 
-	// byNdx and dirs are written by the frame-loop goroutine only (before
-	// Do's errgroup joins) and read by the frame loop, the deletion
-	// goroutine (after listsDone) and the final touch-up (after both other
-	// goroutines have finished). byNdx entries are deleted again once the
-	// entry's file data has been received (releaseFile) — from that point
-	// on, no frame references the ndx and the File can be garbage
-	// collected. dirs survives until the end for the permission touch-up.
+	// byNdx is written by the frame-loop goroutine only (before Do's
+	// errgroup joins) and read by the frame loop. Entries are deleted again
+	// once the entry's file data has been received (releaseFile) — from that
+	// point on, no frame references the ndx and the File can be garbage
+	// collected.
 	byNdx map[int32]*File // wire ndx → file, for routing incoming data
-	dirs  []*File         // directories in arrival order = the sender's dir index space
+
+	// dirHashes holds a 128-bit hash of every received directory's name, in
+	// arrival order = the sender's dir index space. It replaces the former
+	// []*File directory list: the only mid-transfer consumer (the segment
+	// parent check in pushEntries) needs to prove a name equality, not the
+	// name itself, so the full File structs are garbage collected once the
+	// generator has processed them and this is all that stays
+	// (docs/dirs-two-phase.md). Written by the frame-loop goroutine.
+	dirHashes [][2]uint64
+
+	// retouch collects the unwritable directories — the ones handed a
+	// temporary write bit while being filled (generator.go) — for the
+	// end-of-transfer permission touch-up, which is the only other consumer
+	// the directory list ever had. Written by the generator goroutine,
+	// read by Do after the errgroup join established happens-before.
+	retouch []*File
 
 	// names holds just the received entries' names, for the --delete
 	// comparison late in the transfer. It is the compact remnant of the
@@ -106,12 +119,12 @@ func (inc *incRecv) fail(err error) {
 // name dirIdx's directory as its parent. It returns the segment's entries
 // with their wire ndx assigned.
 func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEntry) ([]*File, error) {
-	var dirName string
+	var want [2]uint64
 	if dirIdx >= 0 {
-		if int(dirIdx) >= len(inc.dirs) {
-			return nil, fmt.Errorf("invalid file-list dir index %d (have %d dirs)", dirIdx, len(inc.dirs))
+		if int(dirIdx) >= len(inc.dirHashes) {
+			return nil, fmt.Errorf("invalid file-list dir index %d (have %d dirs)", dirIdx, len(inc.dirHashes))
 		}
-		dirName = inc.dirs[dirIdx].Name
+		want = inc.dirHashes[dirIdx]
 	}
 
 	// flist.c:2467/2814: the C sender writes each segment's entries in
@@ -124,8 +137,8 @@ func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEnt
 	// the C receiver fsorts dir_flist per segment (flist.c:3049).
 	files := make([]*File, len(fes))
 	for i, fe := range fes {
-		if dirIdx >= 0 && flist.ParentPath(fe.Name) != dirName {
-			return nil, fmt.Errorf("file-list entry %q does not belong to dir %q", fe.Name, dirName)
+		if dirIdx >= 0 && dirHash128(flist.ParentPath(fe.Name)) != want {
+			return nil, fmt.Errorf("file-list entry %q does not belong to dir index %d", fe.Name, dirIdx)
 		}
 		files[i] = rt.toFile(fe)
 	}
@@ -136,7 +149,7 @@ func (inc *incRecv) pushEntries(rt *Transfer, dirIdx int32, fes []*flist.FileEnt
 		f.Ndx = inc.nextNdx
 		inc.nextNdx++
 		if f.isDir() {
-			inc.dirs = append(inc.dirs, f)
+			inc.dirHashes = append(inc.dirHashes, dirHash128(f.Name))
 		}
 		inc.byNdx[f.Ndx] = f
 		if rt.Opts.DeleteMode {

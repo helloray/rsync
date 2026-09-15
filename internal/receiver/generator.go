@@ -190,6 +190,13 @@ func (rt *Transfer) recvGenerator(f *File) error {
 			// GenerateFiles will fix permissions afterwards.
 			rt.retouchDirPerms = true
 			mode |= syscall.S_IWUSR
+			if rt.inc != nil {
+				// Under incremental recursion this is the last point where
+				// the full File is at hand — the directory list is kept as
+				// 128-bit name hashes only — so collect the entry for the
+				// end-of-transfer touch-up here (docs/dirs-two-phase.md).
+				rt.inc.retouch = append(rt.inc.retouch, f)
+			}
 		}
 		if err := rt.setPerms(f, mode); err != nil {
 			return err

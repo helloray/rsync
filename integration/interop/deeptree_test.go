@@ -360,3 +360,47 @@ func TestInteropDeepTreeGoClientPushToC(t *testing.T) {
 	syncGoClientPushToC(t, source, dest)
 	verifySame(t, source, filepath.Join(dest, filepath.Base(source)))
 }
+
+// verifyDirsUnwritable fails unless every directory below root (excluding
+// root itself) has lost its owner write bit — the state touchUpDirs must
+// leave the destination in after the source announced unwritable dirs.
+func verifyDirsUnwritable(t *testing.T, root string) {
+	t.Helper()
+	_, dirs := treeContents(t, root)
+	if len(dirs) == 0 {
+		t.Fatal("no directories to check")
+	}
+	for dir := range dirs {
+		st, err := os.Stat(filepath.Join(root, filepath.FromSlash(dir)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm()&0o200 != 0 {
+			t.Errorf("dir %s = %o, want the write bit cleared after touch-up", dir, st.Mode().Perm())
+		}
+	}
+}
+
+// TestInteropDeepTreeUnwritableDirs: directories announced with the owner
+// write bit clear must be created writeable while being filled and restored
+// afterwards by touchUpDirs — including on a re-sync, where the unwritable
+// destination directories already exist (the generator hands them a
+// temporary write bit again, per docs/dirs-two-phase.md). The C client
+// forces the modes via --chmod=D0500, since Windows source trees cannot
+// represent unwritable directories natively.
+func TestInteropDeepTreeUnwritableDirs(t *testing.T) {
+	t.Parallel()
+	source := createDeepTree(t)
+	dest := t.TempDir()
+
+	pushToGoDaemon(t, source, dest, "--chmod=D0500")
+	verifySame(t, source, dest)
+	verifyDirsUnwritable(t, dest)
+
+	// Re-sync with --delete over the now-unwritable destination dirs: the
+	// generator must re-enter them (temporary write bit), delete nothing,
+	// and the touch-up must restore the modes again.
+	pushToGoDaemon(t, source, dest, "--chmod=D0500", "--delete")
+	verifySame(t, source, dest)
+	verifyDirsUnwritable(t, dest)
+}

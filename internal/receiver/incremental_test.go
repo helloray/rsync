@@ -85,8 +85,8 @@ func TestIncRecvSegmentFlow(t *testing.T) {
 	inc.markListsDone()
 	drainNext(t, inc, "", false, true)
 
-	if got := len(inc.dirs); got != 3 {
-		t.Errorf("dirs = %d entries, want 3", got)
+	if got := len(inc.dirHashes); got != 3 {
+		t.Errorf("dirHashes = %d entries, want 3", got)
 	}
 	del := inc.deleteList()
 	if len(del) != 6 {
@@ -142,6 +142,11 @@ func TestIncRecvParentValidation(t *testing.T) {
 	if _, err := inc.pushEntries(rt, 1, []*flist.FileEntry{rreg("b/x")}); err == nil {
 		t.Error("entry with mismatched parent accepted")
 	}
+	// A segment addressed to the wrong known dir (index 0 = ".", the entry
+	// belongs to "a" at index 1) must also be rejected by the hash compare.
+	if _, err := inc.pushEntries(rt, 0, []*flist.FileEntry{rreg("a/x")}); err == nil {
+		t.Error("segment for dir a accepted under dir index 0")
+	}
 	if _, err := inc.pushEntries(rt, 1, []*flist.FileEntry{rreg("a/x")}); err != nil {
 		t.Errorf("valid segment rejected: %v", err)
 	}
@@ -192,12 +197,12 @@ func TestIncRecvRelease(t *testing.T) {
 	}
 
 	// The released entry's name stays in the delete list, the dir stays in
-	// the touch-up list.
+	// the hash list (for segment validation).
 	if del := inc.deleteList(); len(del) != 2 || del[0] != "." || del[1] != "top.txt" {
 		t.Errorf("deleteList = %v, want [. top.txt]", del)
 	}
-	if len(inc.dirs) != 1 || inc.dirs[0].Name != "." {
-		t.Errorf("dirs = %v, want [.]", inc.dirs)
+	if len(inc.dirHashes) != 1 || inc.dirHashes[0] != dirHash128(".") {
+		t.Errorf("dirHashes = %v, want [hash(.)]", inc.dirHashes)
 	}
 }
 
@@ -226,12 +231,12 @@ func TestIncRecvSkipRelease(t *testing.T) {
 	}
 
 	// The released entries' names stay in the delete list, the dir stays in
-	// the touch-up list.
+	// the hash list (for segment validation).
 	if del := inc.deleteList(); len(del) != 3 {
 		t.Errorf("deleteList = %v, want 3 names", del)
 	}
-	if len(inc.dirs) != 1 || inc.dirs[0].Name != "." {
-		t.Errorf("dirs = %v, want [.]", inc.dirs)
+	if len(inc.dirHashes) != 1 || inc.dirHashes[0] != dirHash128(".") {
+		t.Errorf("dirHashes = %v, want [hash(.)]", inc.dirHashes)
 	}
 }
 

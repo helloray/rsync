@@ -177,10 +177,12 @@ func (rt *Transfer) Do(c *rsyncwire.Conn, fileList []*File, noReport bool) (*rsy
 		return nil, err
 	}
 	if rt.inc != nil {
-		// Only the directory entries survive to the end of an incremental
-		// transfer (everything else is released as its data arrives), which
-		// is all the permission touch-up looks at.
-		fileList = rt.inc.dirs
+		// Only the retouch set survives to the end of an incremental
+		// transfer (everything else is released as its data arrives; even
+		// the directory list is down to 128-bit name hashes). The touch-up
+		// walks exactly the entries the generator collected under the same
+		// condition that sets retouchDirPerms.
+		fileList = rt.inc.retouch
 	}
 	if rt.retouchDirPerms /* || rt.retouchDirTimes */ {
 		if err := rt.touchUpDirs(fileList); err != nil {
